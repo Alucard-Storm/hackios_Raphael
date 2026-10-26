@@ -1997,13 +1997,20 @@ legacy_rpmh_ucode(void)
 	static const uint32_t rsc_program[5] = { 0xa7a506a0, 0xa1e6a6e7, 0xa2e081e1, 0xe9a982e2, 0x0020e8a8 };
 	static const uint32_t pdc_program[5] = { 0xfebea1e1, 0xa5a4a3a2, 0x8382a6e0, 0xbce3e284, 0x002081fc };
 	/* (the commands' addresses are RPMh's: 0x30010 mx.lvl, 0x30000 cx.lvl, 0x30090 the GPU's rail on this SoC) */
-	static const struct {
+	struct {
 		uint32_t control, enable, wait, msgid;  /* word offsets in the PDC's configuration block */
 		uint32_t address[3], data[3];
 	} tcs[2] = {
 		{ 0x1572, 0x1573, 0x1574, 0x1575, { 0x30010, 0x30000, 0x30090 }, { 1, 0, 0 } },
 		{ 0x15d6, 0x15d7, 0x15d8, 0x15d9, { 0x30010, 0x30000, 0x30090 }, { 2, 3, 3 } },
 	};
+	/* the vendor's third address is the GPU rail of its SoC; this phone's command database has its own */
+	uint32_t gfx_address = rpmh_resource("gfx.lvl", NULL, NULL);
+
+	printf("adreno: %u: the GPU rail's RPMh address: %#x (the vendor's source says %#x)\n", step, gfx_address, tcs[0].address[2]);
+	if (gfx_address != 0) {
+		tcs[0].address[2] = tcs[1].address[2] = gfx_address;
+	}
 
 	announce("give the GMU's RPMh channel and the GPU's power domain sequencer their programs, as the vendor's driver "
 	    "does for this GPU (rscc, pdc, pdc_seq)");
@@ -2432,9 +2439,13 @@ static uint32_t core_khz;               /* the 3D core's speed, as asked of the 
 static bool
 step_core_power(void)
 {
-	static const struct {
+	static const struct speed {
 		uint32_t khz, level;
-	} speeds[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } };
+	} speeds_642[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } },
+	    /* the Adreno 640's operating points (sm8150-gpu.dtsi): the rail levels low SVS, SVS, SVS+, nominal, nominal+, turbo */
+	    speeds_640[] = { { 0, 0 }, { 215000, 64 }, { 309110, 128 }, { 379650, 192 }, { 486460, 256 }, { 553850, 320 },
+		{ 600000, 384 } };
+	const struct speed *speeds = gpu_model->legacy_gmu ? speeds_640 : speeds_642;
 	static struct hfi_perf_table perf;
 	static struct hfi_bw_table bw;
 	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, HFI_NO_INDEX }, granted = 0, speed = 0;
@@ -2449,7 +2460,7 @@ step_core_power(void)
 		printf("adreno: %u: RPMh's list lacks one of the rails\n", step);
 		return false;
 	}
-	perf.gpu_levels = sizeof(speeds) / sizeof(speeds[0]);
+	perf.gpu_levels = gpu_model->legacy_gmu ? sizeof(speeds_640) / sizeof(speeds_640[0]) : sizeof(speeds_642) / sizeof(speeds_642[0]);
 	for (unsigned i = 0; i < perf.gpu_levels; i++) {
 		perf.gpu[i].khz = speeds[i].khz;
 		perf.gpu[i].acd = 0xffffffff;           /* no adaptive clocking */
@@ -2495,7 +2506,8 @@ step_core_power(void)
 	if (!hfi_send("the table of speeds", HFI_PERF_TABLE, &perf.header, sizeof(perf) / 4) ||
 	    !hfi_send("the table of bus votes", HFI_BW_TABLE, &bw.header, sizeof(bw) / 4) ||
 	    !hfi_send("\"start the core firmware\"", HFI_CORE_FW_START, core_start, 2) ||
-	    !hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
+	    /* (the older firmware answers a vote only once the core is powered and started: the vendor's driver votes then) */
+	    (!gpu_model->legacy_gmu && !hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4))) {
 		return false;
 	}
 
@@ -2503,10 +2515,13 @@ step_core_power(void)
 	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	put(&gmu, "host2gmu_intr_set", GMU_HOST2GMU_INTR_SET, GMU_CORE_REQUEST);
-	for (int i = 0; i < 5000 && !(granted & GMU_CORE_GRANTED); i++) {
+	/* (the older GMU takes a second or more to bring the rail up: the vendor's driver waits for it too) */
+	for (int i = 0; i < (gpu_model->legacy_gmu ? 100000 : 5000) && !(granted & GMU_CORE_GRANTED); i++) {
 		sleep_us(100);
 		granted = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
 	}
+	printf("adreno: %u: the GMU's answer to the request for the core came after %s\n", step,
+	    (granted & GMU_CORE_GRANTED) ? "all" : "none of the wait");
 	core_is_on = true;                      /* asked for, at least: to be given back */
 	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, GMU_CORE_GRANTED);
 	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
@@ -2519,6 +2534,9 @@ step_core_power(void)
 		return false;
 	}
 	if (!hfi_send("\"start\"", HFI_START, start, 1)) {
+		return false;
+	}
+	if (gpu_model->legacy_gmu && !hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4)) {
 		return false;
 	}
 	printf("adreno: %u: measured: the 3D core's clock runs at %u Hz (%u MHz was asked for), the GMU's in it at %u Hz\n", step,

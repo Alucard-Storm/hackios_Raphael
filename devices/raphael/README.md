@@ -208,3 +208,17 @@ access); and a watched run needs `hv_wdt_pet=1 bootcpu=7 cpus=8` among the argum
 heartbeat, which needs another core to run), without which a healthy run is declared hung after 50 s. Without `bootcpu` nothing
 watches and a hang saves no log. Next: step 17 (the 3D core's power through the GMU's messages: the older firmware's protocol
 is HFI version 1), then the 3D core's microcode and zap shader, then a frame.
+
+### Step 17, where it stands (2026-10-27)
+
+The GMU takes the three configuration messages of its protocol (the speed table, the bus table, "start the core firmware": the
+table layouts are the POCO's, and the speeds are the Adreno 640's 215 to 600 MHz at RPMh rail levels 64 to 384). Asked to power the
+3D core (the "OOB" request, bits 30 and 31 as on the POCO), the GMU **brings the GX power switch on** (`gx_gdscr` becomes
+`0x8222000`, bit 6 of `sptprac_pwr_clk_status` clears: "GX power domain off") but **the 3D core's clock does not start** (bit 7,
+"GX clock off", stays set) and the GMU never grants the request, within 10 s (its own log suggests it keeps working for about
+1.5 s). Tried: the vendor's order of the messages (the speed vote only after the core is powered and started), the GPU rail's
+RPMh address from the command database (`0x30050`, not the vendor source's `0x30090`), a longer wait. Not yet looked at: what the
+GMU needs before its first power request (the vendor sets up the 3D core's SMMU context and the GBIF halt first), the PLL0 of the
+GPU clock controller (the Android driver only configures PLL1: the firmware must do the 3D core's), the bus table's votes, and a
+decode of the GMU's event log. The step is a faithful port of the vendor's flow up to this point; what stops it is internal to
+the GMU firmware's power-up sequence.
