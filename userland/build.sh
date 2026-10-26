@@ -83,6 +83,10 @@
 set -e
 # a copy of a tree that shares its files' data: hard links (Linux), clones of the files (macOS's APFS, whose cp has no -l)
 linkcopy() { if [ "$(uname)" = Darwin ]; then cp -cRp "$1" "$2"; else cp -al "$1" "$2"; fi; }
+# The images take the permission bits of the files as they are made here, and launchd refuses a job's plist that
+# is writable by its group ("Path had bad ownership/permissions", error 122): so 0644, whatever the shell's umask
+# is (a Linux user's is usually 002, which makes 0664).
+umask 022
 cd "$(dirname "$(readlink -f "$0")")"
 source ../xnu-env.sh
 
