@@ -126,3 +126,26 @@ Two build-environment traps that cost a run each: the images take the files' per
 refuses a plist that is group-writable (`error = 122: Path had bad ownership/permissions`), so the build now
 sets `umask 022` (a Linux user's default umask is 002); and `mkidentity.sh` needs an LZFSE decoder, which
 Ubuntu has as the `lzfse` package.
+
+## Touch screen: proven from the loader (2026-10-26)
+
+`xl touch [SECONDS]` (the loader's `oem touch`, `touch_probe()` in `xnuloader/loader.c`) powers the chip, resets it,
+talks to it and prints what it reports while the screen is touched. On the Redmi K20 Pro it works first time
+after one fix (the slave bus clock has hardware gating and reads "off" while idle, so only the engine's clock
+and the master bus clock are waited for): 4054 reports in 40 s, none with a bad checksum, finger paths as
+coordinates in the panel's own 1080 x 2340. Everything the kernel driver needs is in that function:
+
+| What | Value |
+|---|---|
+| Chip | Goodix GT9886 ("normandy"), I2C address `0x5d`, 16-bit big-endian register addresses |
+| Bus | QUPv3 wrapper 2, engine at `0xC88000` (GENI, protocol 3 = I2C, FIFO mode, polled), 100 kHz from the 19.2 MHz XO (divider 7, SCL counters 10/11/26) |
+| Clocks (GCC at `0x100000`) | engine source RCG `0x1e3a8` (cfg 0: XO, no divider, then update), votes in `0x52014`: bit 6 engine, bit 2 master AHB, bit 1 slave AHB |
+| Pins (TLMM south tile `0x3D00000 + 0x1000*n`, input/output at +4) | SDA 57 and SCL 58 function 2 (`qup19`); reset 54 (output, pulled up, 16 mA); interrupt 122 (input, pulled up, active low); 3.3 V enable 98 and 1.8 V enable 100 (outputs) |
+| Power-up | 98 high, 10 ms, 100 high, 300 ms, reset low 2 ms then high, 350 ms |
+| Report | 12 bytes at register `0x4100`: byte 0 bit 7 = touch event, byte 1 low nibble = contacts, then per contact `id, x lo, x hi, y lo, y hi, w, ...` (8 bytes); with more than one contact read `(n-1)*8` more at `0x410C`; the sum of the first `4 + 8n` bytes is 0 mod 256; write 0 to `0x4100` to acknowledge |
+| Product id | register `0x4535`: "9886"; version block at `0x452c`: "NOR_G1" |
+
+The config is already in the chip (nothing is downloaded); the chip's register map comes from
+`goodix_gt9886_cfg_f11.bin`, which the Android kernel builds in (`firmware/goodix_gt9886_cfg_f11.bin.ihex`).
+Next: the same sequence as a kernel driver (`bsd/dev/`, feeding `/dev/hakios-touch`), which needs the kernel rebuilt
+(theos and the iOS 16.5 SDK, `xnu-deps/setup.sh`).

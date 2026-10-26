@@ -21,6 +21,8 @@
 #   xl reboot           cold-reset the phone (back to Android)
 #   xl reload           restart the phone into a freshly built loader (after changing xnuloader/)
 #   xl memmap           the phone's memory map as its firmware reports it
+#   xl touch [SECS]     Redmi K20 Pro: power the touch chip, talk to it over I2C and print what it reports while
+#                       the screen is touched (default 20 s): a bring-up aid, see xnuloader/loader.c touch_probe
 #   xl state            where is the phone right now
 #
 # Logs land in logs/. Environment for `run`:
@@ -374,6 +376,7 @@ memmap) enter && fb oem memmap >/dev/null && fb oem log >/dev/null && fetch_log 
 hang) enter && fb oem hang; echo "xl: waiting for the watchdog..."; t0=$(date +%s); wait_for android 150 && echo "xl: back in Android after $(( $(date +%s) - t0 )) s" || echo "xl: not back (state: $(state))" ;;
 reboot) not_anothers_run reboot && fb reboot ;;
 reload) [ "$(state)" = loader ] && { fb reboot >/dev/null; wait_for android 120; }; enter && echo "xl: loader is up" ;;
+touch) enter && FB_TIMEOUT=$(( ${2:-20} + 20 )) fb oem touch ${2:-20} | tail -1 && fb oem log >/dev/null && fetch_log logs/loader.log && grep -a 'touch:' logs/loader.log ;;
 state) state ;;
 *) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0" ;;
 esac

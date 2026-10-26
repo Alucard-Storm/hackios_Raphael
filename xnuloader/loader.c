@@ -2537,6 +2537,389 @@ wdt_arm(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* Touch screen probe: the Redmi K20 Pro's Goodix GT9886 on I2C ("oem touch")  */
+/*
+ * A bring-up aid, not part of a run: powers the chip, resets it, talks to it through QUPv3 serial
+ * engine 2 of wrapper 2 (GENI, FIFO mode, polled) and prints what it reports while the screen is
+ * touched, to see that the clocks, pins, bus and report format are right before the kernel gets a
+ * driver for it. Everything below is this phone's (SM8150); the numbers are from the Android
+ * kernel's drivers/clk/qcom/gcc-sm8150.c, drivers/pinctrl/qcom/pinctrl-sm8150.c, the raphael device
+ * tree and the vendor driver drivers/input/touchscreen/xiaomi/goodix_driver_gt9886 (the register
+ * map is in the chip's config file goodix_gt9886_cfg_f11.bin: touch report 0x4100, product id 0x4535).
+ */
+#define TP_GCC          0x00100000ULL
+#define TP_TLMM         0x03D00000ULL   /* the "south" tile: GPIO n's registers are at +0x1000*n, its input/output at +4 */
+#define TP_SE           0x00C88000ULL   /* wrapper 2, engine 2 (qupv3_se19_i2c in the device tree) */
+#define TP_ADDR         0x5d
+#define TP_PIN_RESET    54
+#define TP_PIN_IRQ      122
+#define TP_PIN_VDD      98              /* 3.3 V enable */
+#define TP_PIN_AVDD     100             /* 1.8 V enable */
+#define TP_PIN_SDA      57
+#define TP_PIN_SCL      58
+
+static inline uint32_t
+mmio_r(uint64_t a)
+{
+	return *(volatile uint32_t *)(uintptr_t)a;
+}
+
+static inline void
+mmio_w(uint64_t a, uint32_t v)
+{
+	*(volatile uint32_t *)(uintptr_t)a = v;
+}
+
+#define SE(off)         (TP_SE + (off))
+
+static uint64_t
+tp_now_us(void)
+{
+	return READ_SYSREG(CNTVCT_EL0) / (READ_SYSREG(CNTFRQ_EL0) / 1000000);
+}
+
+/* function 0 is GPIO; pull 0 none, 3 up; drive bits = mA/2 - 1 */
+static void
+tp_pin(unsigned n, unsigned function, unsigned drive, unsigned pull, int output, int value)
+{
+	uint64_t cfg = TP_TLMM + 0x1000ULL * n;
+
+	if (output) {
+		mmio_w(cfg + 4, (uint32_t)value << 1);
+	}
+	mmio_w(cfg, pull | function << 2 | drive << 6 | (output ? 1u << 9 : 0));
+}
+
+static void
+tp_set(unsigned n, int value)
+{
+	mmio_w(TP_TLMM + 0x1000ULL * n + 4, (uint32_t)value << 1);
+}
+
+static int
+tp_level(unsigned n)
+{
+	return mmio_r(TP_TLMM + 0x1000ULL * n + 4) & 1;
+}
+
+/* the engine's functional clock from the XO (19.2 MHz) and the two bus clocks of its wrapper; 0 = running */
+static int
+tp_clocks(void)
+{
+	uint64_t rcg = TP_GCC + 0x1e3a8;
+	static const uint32_t halt[3] = { 0x1e3a4, 0x1e004, 0x1e008 };
+
+	print("touch: clock: RCG cmd=%x cfg=%x, vote=%x, halt s2=%x m_ahb=%x s_ahb=%x (before)\n", (uint64_t)mmio_r(rcg),
+	    (uint64_t)mmio_r(rcg + 4), (uint64_t)mmio_r(TP_GCC + 0x52014), (uint64_t)mmio_r(TP_GCC + halt[0]),
+	    (uint64_t)mmio_r(TP_GCC + halt[1]), (uint64_t)mmio_r(TP_GCC + halt[2]));
+	mmio_w(rcg + 4, 0);             /* source 0 (XO), no divider */
+	mmio_w(rcg, 1);                 /* update */
+	for (int i = 0; i < 1000 && (mmio_r(rcg) & 1); i++) {
+		BS->stall(10);
+	}
+	mmio_w(TP_GCC + 0x52014, mmio_r(TP_GCC + 0x52014) | (1u << 6) | (1u << 2) | (1u << 1));
+	for (int i = 0; i < 1000; i++) {
+		/* the slave bus clock has hardware gating (bit 1 of its register): it reads "off" while idle and turns on
+		 * by itself when the engine is used, so only the engine's clock and the master bus clock are waited for */
+		if (!((mmio_r(TP_GCC + halt[0]) | mmio_r(TP_GCC + halt[1])) & 0x80000000u)) {
+			print("touch: clocks on (RCG cmd=%x cfg=%x)\n", (uint64_t)mmio_r(rcg), (uint64_t)mmio_r(rcg + 4));
+			return 0;
+		}
+		BS->stall(10);
+	}
+	print("touch: the clocks did not come on: halt s2=%x m_ahb=%x s_ahb=%x\n", (uint64_t)mmio_r(TP_GCC + halt[0]),
+	    (uint64_t)mmio_r(TP_GCC + halt[1]), (uint64_t)mmio_r(TP_GCC + halt[2]));
+	return -1;
+}
+
+static uint32_t tp_fifo_depth;
+
+static const char *
+tp_geni_init(void)
+{
+	uint32_t protocol = mmio_r(SE(0x68)) >> 8 & 0xff;
+
+	print("touch: engine: protocol %d (3 = I2C), FIFO interface %s, FW revision %x\n", (uint64_t)protocol,
+	    (mmio_r(SE(0x64)) & 1) ? "disabled" : "on", (uint64_t)mmio_r(SE(0x68)));
+	if (protocol != 3) {
+		return "the serial engine has no I2C firmware";
+	}
+	if (mmio_r(SE(0x64)) & 1) {
+		return "the serial engine's FIFO interface is disabled";
+	}
+	tp_fifo_depth = mmio_r(SE(0xe24)) >> 16 & 0x3f;
+	if (tp_fifo_depth < 4) {
+		return "the serial engine reports no FIFO";
+	}
+	mmio_w(SE(0xe18), 0);                                   /* no GSI events */
+	mmio_w(SE(0x618), 0xffffffff);                          /* M irq clear */
+	mmio_w(SE(0x648), 0xffffffff);                          /* S irq clear */
+	mmio_w(SE(0xc44), 0xffffffff);                          /* DMA irq clears */
+	mmio_w(SE(0xd44), 0xffffffff);
+	mmio_w(SE(0x28), mmio_r(SE(0x28)) | 0x7f);              /* clock gating */
+	mmio_w(SE(0xe30), mmio_r(SE(0xe30)) | 0xf);
+	mmio_w(SE(0x24), 0x7f);                                 /* output control */
+	mmio_w(SE(0x20), 1);                                    /* force default */
+	mmio_w(SE(0x258), mmio_r(SE(0x258)) & ~1u);             /* FIFO mode, not DMA */
+	mmio_w(SE(0x810), tp_fifo_depth - 3);
+	mmio_w(SE(0x814), tp_fifo_depth - 2);
+	mmio_w(SE(0x80c), 0);
+	mmio_w(SE(0xe1c), mmio_r(SE(0xe1c)) | 0xf);
+	mmio_w(SE(0x614), mmio_r(SE(0x614)) | 0x7fc0007f);      /* the status bits polled below follow these enables */
+	mmio_w(SE(0x260), 0x0007f8fe);                          /* 8 bits, four to a FIFO word */
+	mmio_w(SE(0x264), 0x000ffefe);
+	mmio_w(SE(0x284), 0x0007f8fe);
+	mmio_w(SE(0x288), 0x000ffefe);
+	mmio_w(SE(0x254), 0);
+	/* 100 kHz from a 19.2 MHz engine clock: divider 7, high 10, low 11, cycle 26 (Linux i2c-qcom-geni.c) */
+	mmio_w(SE(0x7c), 0);
+	mmio_w(SE(0x48), 7u << 4 | 1);
+	mmio_w(SE(0x278), 10u << 20 | 11u << 10 | 26);
+	return NULL;
+}
+
+#define TP_M_DONE       (1u << 0)
+#define TP_M_ERRORS     ((1u << 1) | (1u << 2) | (1u << 3) | (1u << 10) | (1u << 12) | (1u << 13) | (1u << 24) | (1u << 25) | (1u << 28) | (1u << 29))
+
+static void
+tp_recover(void)
+{
+	mmio_w(SE(0x604), 1u << 2);                             /* cancel */
+	for (int i = 0; i < 2000 && !(mmio_r(SE(0x610)) & (1u << 4)); i++) {
+		BS->stall(100);
+	}
+	if (!(mmio_r(SE(0x610)) & (1u << 4))) {
+		mmio_w(SE(0x604), 1u << 1);                     /* abort */
+		for (int i = 0; i < 2000 && !(mmio_r(SE(0x610)) & (1u << 5)); i++) {
+			BS->stall(100);
+		}
+	}
+	for (int i = 0; i < 64 && (mmio_r(SE(0x804)) & 0x01ffffff); i++) {
+		(void)mmio_r(SE(0x780));
+	}
+	mmio_w(SE(0x618), 0xffffffff);
+}
+
+/* One I2C message: write `len` bytes from buf (stretch: keep the bus for the read that follows), or read them into buf. */
+static int
+tp_xfer(int write, uint8_t *buf, uint32_t len, int stretch)
+{
+	uint32_t sent = 0, got = 0, status = 0;
+	uint64_t until;
+
+	for (int i = 0; (mmio_r(SE(0x40)) & 1) && i < 2000; i++) {
+		BS->stall(100);
+	}
+	mmio_w(SE(0x618), 0xffffffff);
+	if (write) {
+		mmio_w(SE(0x26c), len);
+		mmio_w(SE(0x600), 1u << 27 | (uint32_t)TP_ADDR << 9 | (stretch ? 4u : 0));
+	} else {
+		mmio_w(SE(0x270), len);
+		mmio_w(SE(0x600), 2u << 27 | (uint32_t)TP_ADDR << 9);
+	}
+	until = tp_now_us() + 100000;
+	while (tp_now_us() < until) {
+		if (write) {
+			while (sent < len && (mmio_r(SE(0x800)) & 0x0fffffff) + 1 < tp_fifo_depth) {
+				uint32_t word = 0;
+
+				for (int j = 0; j < 4 && sent < len; j++, sent++) {
+					word |= (uint32_t)buf[sent] << (8 * j);
+				}
+				mmio_w(SE(0x700), word);
+			}
+		} else {
+			uint32_t st = mmio_r(SE(0x804)), words = st & 0x01ffffff, bytes = words * 4;
+
+			if (st & 0x80000000u) {
+				uint32_t valid = st >> 28 & 7;
+
+				if (valid && valid < 4) {
+					bytes -= 4 - valid;
+				}
+			}
+			for (uint32_t i = 0; i < words; i++) {
+				uint32_t word = mmio_r(SE(0x780));
+
+				for (int j = 0; j < 4 && bytes; j++, bytes--) {
+					if (got < len) {
+						buf[got++] = (uint8_t)(word >> (8 * j));
+					}
+				}
+			}
+		}
+		status = mmio_r(SE(0x610));
+		if (status & TP_M_ERRORS) {
+			break;
+		}
+		if (status & TP_M_DONE) {
+			mmio_w(SE(0x618), status);
+			if (!write) {
+				/* what is left in the FIFO */
+				uint32_t st = mmio_r(SE(0x804)), words = st & 0x01ffffff, bytes = words * 4;
+
+				if (st & 0x80000000u) {
+					uint32_t valid = st >> 28 & 7;
+
+					if (valid && valid < 4) {
+						bytes -= 4 - valid;
+					}
+				}
+				for (uint32_t i = 0; i < words; i++) {
+					uint32_t word = mmio_r(SE(0x780));
+
+					for (int j = 0; j < 4 && bytes; j++, bytes--) {
+						if (got < len) {
+							buf[got++] = (uint8_t)(word >> (8 * j));
+						}
+					}
+				}
+			}
+			return (write ? sent : got) == len ? 0 : -2;
+		}
+	}
+	print("touch: I2C %s of %d bytes failed: M_IRQ_STATUS=%x (bit 10 = no ACK), sent %d, got %d\n", write ? "write" : "read",
+	    (uint64_t)len, (uint64_t)status, (uint64_t)sent, (uint64_t)got);
+	tp_recover();
+	return -1;
+}
+
+static int
+tp_read(uint16_t reg, uint8_t *buf, uint32_t len)
+{
+	uint8_t a[2] = { (uint8_t)(reg >> 8), (uint8_t)reg };
+
+	if (tp_xfer(1, a, 2, 1) != 0) {
+		return -1;
+	}
+	return tp_xfer(0, buf, len, 0);
+}
+
+static int
+tp_write(uint16_t reg, const uint8_t *data, uint32_t len)
+{
+	uint8_t b[16];
+
+	if (len > sizeof(b) - 2) {
+		return -1;
+	}
+	b[0] = (uint8_t)(reg >> 8);
+	b[1] = (uint8_t)reg;
+	for (uint32_t i = 0; i < len; i++) {
+		b[2 + i] = data[i];
+	}
+	return tp_xfer(1, b, 2 + len, 0);
+}
+
+static void
+touch_probe(uint32_t seconds)
+{
+	uint8_t id[8], rep[4 + 8 * 10];
+	uint64_t end, next_note, next_poll;
+	uint32_t events = 0, bad = 0, printed = 0;
+	const char *why;
+
+	print("touch: probe for %d s (Goodix GT9886, I2C address %x)\n", (uint64_t)seconds, (uint64_t)TP_ADDR);
+	if (tp_clocks() != 0) {
+		return;
+	}
+	/* pins: the bus, the chip's reset and interrupt (pulled up, 16 mA as the device tree has them), its two supplies */
+	tp_pin(TP_PIN_SDA, 2, 0, 0, 0, 0);
+	tp_pin(TP_PIN_SCL, 2, 0, 0, 0, 0);
+	tp_pin(TP_PIN_RESET, 0, 7, 3, 1, 1);
+	tp_pin(TP_PIN_IRQ, 0, 7, 3, 0, 0);
+	tp_pin(TP_PIN_VDD, 0, 3, 0, 1, 1);
+	BS->stall(10000);
+	tp_pin(TP_PIN_AVDD, 0, 3, 0, 1, 1);
+	BS->stall(300000);                                      /* the device tree's power-on delay: 300 ms */
+	tp_set(TP_PIN_RESET, 0);                                /* reset: low 2 ms, high, 100 ms (the vendor driver) */
+	BS->stall(2000);
+	tp_set(TP_PIN_RESET, 1);
+	BS->stall(100000);
+	BS->stall(250000);                                      /* the chip's own start-up */
+	print("touch: supplies on, reset done; IRQ line %d\n", (uint64_t)tp_level(TP_PIN_IRQ));
+	why = tp_geni_init();
+	if (why) {
+		print("touch: %s\n", why);
+		return;
+	}
+	if (tp_read(0x4535, id, 8) != 0) {
+		print("touch: no answer from the chip at %x (product id read failed)\n", (uint64_t)TP_ADDR);
+		return;
+	}
+	print("touch: product id at 4535: %x %x %x %x %x %x %x %x = \"%c%c%c%c\" (expect 9886)\n", (uint64_t)id[0], (uint64_t)id[1],
+	    (uint64_t)id[2], (uint64_t)id[3], (uint64_t)id[4], (uint64_t)id[5], (uint64_t)id[6], (uint64_t)id[7], (uint64_t)id[0],
+	    (uint64_t)id[1], (uint64_t)id[2], (uint64_t)id[3]);
+	tp_read(0x452c, rep, 12);
+	print("touch: version block at 452c: %x %x %x %x %x %x %x %x %x %x %x %x\n", (uint64_t)rep[0], (uint64_t)rep[1], (uint64_t)rep[2],
+	    (uint64_t)rep[3], (uint64_t)rep[4], (uint64_t)rep[5], (uint64_t)rep[6], (uint64_t)rep[7], (uint64_t)rep[8], (uint64_t)rep[9],
+	    (uint64_t)rep[10], (uint64_t)rep[11]);
+	print("touch: now touch the screen\n");
+	end = tp_now_us() + (uint64_t)seconds * 1000000;
+	next_note = tp_now_us() + 5000000;
+	next_poll = 0;
+	while (tp_now_us() < end) {
+		uint64_t now = tp_now_us();
+
+		if (now >= next_note) {
+			print("touch: ... %d reports so far (%d bad), IRQ line %d\n", (uint64_t)events, (uint64_t)bad,
+			    (uint64_t)tp_level(TP_PIN_IRQ));
+			next_note = now + 5000000;
+		}
+		/* the interrupt line is low (falling-edge) when there is a report; look anyway every 50 ms */
+		if (tp_level(TP_PIN_IRQ) == 0 || now >= next_poll) {
+			uint32_t n, sum = 0;
+			uint8_t zero = 0;
+
+			next_poll = now + 50000;
+			if (tp_read(0x4100, rep, 12) != 0) {
+				bad++;
+				BS->stall(10000);
+				continue;
+			}
+			if (!(rep[0] & 0x80)) {
+				BS->stall(2000);
+				continue;
+			}
+			n = rep[1] & 0x0f;
+			if (n > 10) {
+				bad++;
+			} else {
+				if (n > 1 && tp_read(0x4100 + 12, rep + 12, (n - 1) * 8) != 0) {
+					bad++;
+					goto ack;
+				}
+				for (uint32_t i = 0; i < n * 8 + 4; i++) {
+					sum += rep[i];
+				}
+				if ((sum & 0xff) != 0) {
+					bad++;
+				} else {
+					events++;
+					if (printed < 80) {
+						printed++;
+						if (n == 0) {
+							print("touch: release\n");
+						}
+						for (uint32_t i = 0; i < n; i++) {
+							print("touch: %d contact(s): id %d at x=%d y=%d w=%d\n", (uint64_t)n,
+							    (uint64_t)(rep[2 + i * 8] & 0xf),
+							    (uint64_t)(rep[3 + i * 8] | rep[4 + i * 8] << 8),
+							    (uint64_t)(rep[5 + i * 8] | rep[6 + i * 8] << 8), (uint64_t)rep[7 + i * 8]);
+						}
+					}
+				}
+			}
+ack:
+			tp_write(0x4100, &zero, 1);                     /* the report has been read */
+		}
+		BS->stall(1000);
+	}
+	print("touch: done: %d reports, %d bad\n", (uint64_t)events, (uint64_t)bad);
+}
+
+/* ------------------------------------------------------------------------ */
 /* UEFI exception hook: put the fault into the log instead of on the screen  */
 
 extern char __ImageBase;
@@ -3835,7 +4218,8 @@ fb_command(char *cmd)
 	{
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
-		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap"))) {
+		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
+		    starts_with(cmd, "oem touch"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
@@ -4007,6 +4391,17 @@ fb_command(char *cmd)
 		} else if (starts_with(cmd, "oem hang")) {
 			fb_reply("OKAY", "watchdog test: not petting any more");
 			for (;;) {
+			}
+		} else if (starts_with(cmd, "oem touch")) {
+			/* "oem touch [SECONDS]": the Goodix GT9886 probe above (the Redmi K20 Pro); the output is in the log */
+			uint32_t secs = (uint32_t)parse_number(cmd[9] == ' ' ? cmd + 10 : "20", 10);
+
+			if (PLAT != &platform_raphael) {
+				fb_reply("FAIL", "this probe is for the Redmi K20 Pro");
+			} else {
+				touch_probe(secs ? secs : 20);
+				flush_log();
+				fb_reply("OKAY", "");
 			}
 		} else if (starts_with(cmd, "oem memmap")) {
 			/* the firmware's memory map into the log (then "oem log" and fetch it) */
