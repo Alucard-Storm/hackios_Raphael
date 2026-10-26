@@ -37,6 +37,7 @@
 #   JOBS=8               parallel jobs for the kernel build
 
 DEVICE ?= redwood
+export DEVICE
 JOBS ?= 8
 SECS ?= 600
 # qemu-open runs the open configuration: configs/defconfig (nothing of a phone's own, one core)
