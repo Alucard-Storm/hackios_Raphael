@@ -588,6 +588,24 @@ static const struct platform platform_redwood = {
 	.small_cores = 0x0f,
 };
 
+static const struct platform platform_raphael = {
+	/* Redmi K20 Pro, Snapdragon 855: GICv3 at the same place as the SM7325's; the cores are numbered
+	 * the same way (affinity 1). Cores 0-3 are Kryo 485 Silver (A55), 4-7 Gold/Prime (A76). */
+	.name = "raphael", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	.small_cores = 0x0f,
+};
+
+/* Kryo 485 (SM8150): implementer 'Q', part 0x805 (Silver) or 0x804 (Gold/Prime) */
+static int
+is_sm8150(void)
+{
+	uint64_t midr = READ_SYSREG(MIDR_EL1);
+	uint32_t part = (uint32_t)(midr >> 4) & 0xfff;
+	return ((midr >> 24) & 0xff) == 0x51 && (part == 0x805 || part == 0x804);
+}
+
 /* ------------------------------------------------------------------------ */
 
 static void
@@ -4345,6 +4363,8 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
 		if (SCREEN.base == 0xE1000000ULL) {
 			PLAT = &platform_redwood;
+		} else if (is_sm8150()) {
+			PLAT = &platform_raphael;       /* the firmware's own display, as on the POCO */
 		} else {
 			ramfb_phone_screen();
 		}
