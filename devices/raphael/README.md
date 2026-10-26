@@ -159,3 +159,15 @@ ends with errors in `config/` (the kext symbol sets, `exported name not in impor
 (`xl` takes it from there by itself, but a `mach.raphael` beside it wins: delete that, or use `XL_KERNEL=`). It has no
 Wi-Fi: the POCO's `ath11k` is a separate library (`tools/mk-ath11k.sh`) that this phone does not need. With it the
 timer interrupt comes from the device tree, so `patch-kernel.py` is no longer needed.
+
+## Battery (2026-10-26)
+
+The POCO's battery path works here as it is, once the loader looks: `charger_start()` in the loader was restricted to the
+POCO (`PLAT != &platform_redwood`) and now also takes the Redmi K20 Pro. The loader finds Qualcomm's own UEFI charger
+drivers by protocol (`QcomChargerDxe`, `ChargerExDxe`, which `Binaries/cepheus` has for this SoC), polls them on core 0 and
+publishes a read-only cache; the kernel's `battery=1` reads it and iOS shows the level, the bolt and the lock-screen ring.
+Charger limits stay with the firmware. Checked: `battery: SOC=99% V=4422 mV, battery=1 charger=1 charging=1 (13 reads, 0 failed)`
+while Android, a moment later, said 100%, 4.35 V, 36.5 C, charging. State of charge, charging and the voltage agree
+(the gauge reads 99 where Android rounds to 100); the temperature (25 C against 36.5 C) and the current (-104 mA against
++385 mA, different loads and perhaps a different sign convention) do not, so the loader's layout for those two on the SM8150
+is unconfirmed (the offsets were confirmed on the POCO only). Run with `battery=1` among the arguments.
