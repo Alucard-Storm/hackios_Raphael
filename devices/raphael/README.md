@@ -105,9 +105,8 @@ while the virtual timer's condition was met, 27 never).
 ## iOS 16.5 on raphael (2026-10-26)
 
 With the pieces above, the stock iOS 16.5 user space boots to the home screen (SpringBoard, the stock apps'
-icons, the dock), drawn in software: no GPU driver, no touch (the Goodix GT988x is on I2C, address 0x5d on the
-bus at 0xc88000, and its supplies are plain GPIOs; the POCO's SPI/RPMh driver does not apply), no sound,
-no cellular or Wi-Fi. What it took, from the top of the repository with `DEVICE=raphael`:
+icons, the dock), drawn in software, with touch (boot-arg `touchscreen=2`, `bsd/dev/hakios.goodix_i2c.c`; the
+POCO's `touchscreen=1` driver is SPI and RPMh and does not apply here): no GPU driver, no sound, no cellular or Wi-Fi. What it took, from the top of the repository with `DEVICE=raphael`:
 
 ```sh
 sysimage/fetch.sh                                   # the IPSW parts from Apple (needs 7-Zip 23+)
@@ -115,7 +114,7 @@ PREBUILT=1 REST=1 userland/build.sh                 # the images, with the prebu
 xnuloader/mkidentity.sh && xnuloader/build.sh       # the loader with the real identity (needs the `lzfse` tool)
 devices/raphael/tools/patch-kernel.py               # mach.raphael: the SM8150's timer interrupt (see above)
 ./xl enter && ./xl ramdisk userland/system.apfs     # the system image into the phone's RAM (~90 s), once per loader session
-XL_CMDLINE="debug=0x8 rd=md0 hv_wdt_pet=1 cpus=8 ufs=2" XL_SECS=900 ./xl run
+XL_CMDLINE="debug=0x8 rd=md0 hv_wdt_pet=1 cpus=8 ufs=2 touchscreen=2" XL_SECS=180 ./xl run
 ```
 
 Leave `-v` out of the arguments for a clean screen (it makes the kernel's console draw over the UI), and
@@ -149,3 +148,14 @@ The config is already in the chip (nothing is downloaded); the chip's register m
 `goodix_gt9886_cfg_f11.bin`, which the Android kernel builds in (`firmware/goodix_gt9886_cfg_f11.bin.ihex`).
 Next: the same sequence as a kernel driver (`bsd/dev/`, feeding `/dev/hakios-touch`), which needs the kernel rebuilt
 (theos and the iOS 16.5 SDK, `xnu-deps/setup.sh`).
+
+## Building the kernel here (2026-10-26)
+
+`make kernel` works on Linux with theos (`~/theos`, with its iOS toolchain and `sdks/iPhoneOS16.5.sdk`) and these
+packages: `flex bison m4 autoconf automake gawk` (not mawk: Ubuntu's default awk keeps the backslash in Apple's
+`makesyscalls.sh`, and the generated `init_sysent.c` does not parse) and LLVM's `dsymutil` (`xnu-build.sh` finds it). It
+ends with errors in `config/` (the kext symbol sets, `exported name not in import list`): the build runs with `-k`
+(keep going) and the kernel is made regardless, as `BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837`
+(`xl` takes it from there by itself, but a `mach.raphael` beside it wins: delete that, or use `XL_KERNEL=`). It has no
+Wi-Fi: the POCO's `ath11k` is a separate library (`tools/mk-ath11k.sh`) that this phone does not need. With it the
+timer interrupt comes from the device tree, so `patch-kernel.py` is no longer needed.

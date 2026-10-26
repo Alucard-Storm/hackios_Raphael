@@ -13,6 +13,13 @@ if [ -f "$LX" ]; then now="$LX $(mtime "$LX")"; else LX= now=; fi
 # the build tools of SETUP/ are Apple's: on macOS they build as they are, on Linux with a compatibility header
 if [ "$XNU_HOST_OS" = Darwin ]; then HOSTCC=clang; else
 HOSTCC="clang -include $XNUDEPS/hostinc/hostcompat.h -I$XNUDEPS/hostinc -Wno-unused-command-line-argument -Wno-error=implicit-function-declaration"; fi
+# the build finds dsymutil with Apple's xcrun, which Linux has not: LLVM's does the same (Debian and Ubuntu
+# call it dsymutil-18 and the like), and without one the link ends in "--minimize: command not found"
+if [ "$XNU_HOST_OS" != Darwin ] && [ -z "${DSYMUTIL:-}" ]; then
+	for d in dsymutil llvm-dsymutil $(compgen -c dsymutil- 2>/dev/null | sort -rV); do
+		command -v "$d" >/dev/null && { export DSYMUTIL=$(command -v "$d"); break; }
+	done
+fi
 if [ -d BUILD/obj ] && [ "$(cat $STAMP 2>/dev/null)" != "$now" ]; then
 	rm -f BUILD/obj/*/mach.*.unstripped
 	echo "$now" > $STAMP

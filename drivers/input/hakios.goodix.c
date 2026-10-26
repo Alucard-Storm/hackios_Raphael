@@ -1528,7 +1528,8 @@ hakios_goodix_init(void)
 	uint32_t enabled = 0;
 	thread_t thread;
 
-	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled)) || !enabled) {
+	/* touchscreen=1: this phone's (the POCO X5 Pro's); 2 is the Redmi K20 Pro's, hakios.goodix_i2c.c */
+	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled)) || enabled != 1) {
 		return;
 	}
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));

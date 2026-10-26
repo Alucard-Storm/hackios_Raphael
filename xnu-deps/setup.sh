@@ -10,7 +10,8 @@
 #   xnu-deps/setup.sh --rebuild-libs   stage 2 again from scratch (after the kernel headers changed)
 #
 # Needs on the machine: git curl tar xz make cc clang flex bison m4 perl python3 autoconf
-# automake, and theos ($THEOS, default ~/theos) with its Linux toolchain
+# automake gawk (not mawk, Ubuntu's default awk: Apple's makesyscalls.sh writes \( in an awk printf
+# string, which mawk keeps with its backslash and the generated C does not parse), and theos ($THEOS, default ~/theos) with its Linux toolchain
 # (toolchain/linux/iphone: the cctools linker) and sdks/iPhoneOS16.5.sdk.
 #
 # What ends up where (all under xnu-deps/, none of it committed):
