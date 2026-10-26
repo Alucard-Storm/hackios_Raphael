@@ -96,6 +96,7 @@
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/hakios.input.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
@@ -282,6 +283,27 @@ wait_for(struct block *b, uint32_t offset, uint32_t mask, uint32_t value, uint32
  * among that node's protected-clocks, the ones the hypervisor keeps to itself. Offsets:
  * gcc-sc7280.c. The touch screen driver uses this controller too.
  */
+/*
+ * Which phone: the GPU is the same family of Adreno 6xx with a GMU on the POCO X5 Pro (642L) and on the Redmi K20 Pro
+ * (640), but its blocks are elsewhere in the SoC and its firmware has other names. The boot loader's device tree says
+ * which phone this is (/arm-io, device_type), and this table is what differs. The values for the Redmi K20 Pro are from
+ * its device tree and the Android kernel (sm8150-gpu.dtsi, gcc-sm8150.c, gpucc-sm8150.c); those marked "?" are
+ * derived from the POCO's layout and not yet confirmed on the phone.
+ */
+struct gpu_model {
+	const char *name;                               /* /arm-io device_type */
+	uint32_t gpu, gpucc, gmu, gmu_size, smmu, smmu_size, pdc, cx_misc, rscc, cmd_db, pll_vote;
+	const char *gmu_firmware, *sqe_firmware, *zap_header, *zap_segment;
+};
+
+static const struct gpu_model gpu_models[] = {
+	{ "redwood", 0x03d00000, 0x03d90000, 0x03d6a000, 0x34000, 0x03da0000, 0x20000, 0x0b290000, 0x03d9e000, 0x03de0000, 0x80860000, 0x52000,
+	  "a660_gmu.bin", "a660_sqe.fw", "a660_zap.mdt", "a660_zap.b02" },
+	{ "raphael", 0x02c00000, 0x02c90000, 0x02c6a000, 0x30000, 0x02ca0000, 0x10000, 0x0b280000, 0x02c9e000 /* ? */,
+	  0x02c8d000 /* ? */, 0x85f20000, 0x52004, "a640_gmu.bin", "a630_sqe.fw", "a640_zap.mdt", "a640_zap.b02" },
+};
+static const struct gpu_model *gpu_model = &gpu_models[0];
+
 static struct block gcc = { "gcc", 0x00100000, 0x80000 };
 #define GCC_PLL_VOTE            0x52000         /* bit 15: gcc_gpu_gpll0_clk_src (600 MHz), bit 16: ..._div_clk_src (300 MHz) */
 #define GCC_PLL_VOTE_GPU_DIV    (1u << 16)
@@ -329,7 +351,7 @@ rpmh_resource(const char *name, uint16_t *levels, unsigned *level_count)
 		*level_count = 0;
 	}
 	if (db == NULL) {
-		db = cmd_db = (const struct cmd_db_header *)ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);  /* memory, not registers */
+		db = cmd_db = (const struct cmd_db_header *)ml_io_map_wcomb(gpu_model->cmd_db, CMD_DB_SIZE);  /* memory, not registers */
 	}
 	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
 		return 0;
@@ -389,7 +411,7 @@ static bool
 step_outside(void)
 {
 	announce("read the GPU's clocks in the global clock controller (registers the touch screen driver uses too)");
-	get(&gcc, "pll votes", GCC_PLL_VOTE);
+	get(&gcc, "pll votes", gpu_model->pll_vote);
 	get(&gcc, "gpu_cfg_ahb", GCC_GPU_CFG_AHB_CBCR);
 	get(&gcc, "gpu_memnoc_gfx", GCC_GPU_MEMNOC_GFX_CBCR);
 	get(&gcc, "gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR);
@@ -441,9 +463,13 @@ step_fuses(void)
 	bin = bin >> 5 & 0xff;
 	speed_bin = bin;
 	gaming = get8(&qfprom, "gaming bin", QFPROM_CORRECTED + QFPROM_GPU_GAMING_BIN) >> 5 & 1;
+	if (gpu_model != &gpu_models[0]) {
+		printf("adreno: %u: the fuses' cells are not known for this phone (the bytes above are the POCO's offsets)\n", step);
+	} else {
 	/* dt: qcom,gpu-models: 0xac and 0xbe are sold as Adreno 643, anything else is the 642L */
-	printf("adreno: %u: speed bin %u: an Adreno %s; gaming bin %u\n", step, bin, bin == 0xac || bin == 0xbe ? "643" : "642L",
-	    gaming);
+		printf("adreno: %u: speed bin %u: an Adreno %s; gaming bin %u\n", step, bin, bin == 0xac || bin == 0xbe ? "643" : "642L",
+		    gaming);
+	}
 
 	announce("read the same fuses where the phone's device tree has them (0x780000)");
 	bin = get8(&qfprom, "raw speed bin, low", QFPROM_GPU_SPEED_BIN);
@@ -660,7 +686,7 @@ step_clocks(void)
 		return false;
 	}
 	announce("in the global clock controller: ask for the 300 MHz tap for the GPU; the GPU's bus and memory clocks on");
-	set(&gcc, "pll votes", GCC_PLL_VOTE, GCC_PLL_VOTE_GPU_DIV);
+	set(&gcc, "pll votes", gpu_model->pll_vote, GCC_PLL_VOTE_GPU_DIV);
 	if (!clock_on(&gcc, "gpu_memnoc_gfx", GCC_GPU_MEMNOC_GFX_CBCR, false) ||
 	    !clock_on(&gcc, "gpu_snoc_dvm_gfx", GCC_GPU_SNOC_DVM_GFX_CBCR, true) ||
 	    !clock_on(&gcc, "ddrss_gpu_axi", GCC_DDRSS_GPU_AXI_CBCR, false)) {
@@ -668,20 +694,30 @@ step_clocks(void)
 	}
 
 	announce("in the GPU's clock controller: the GMU's clock to 200 MHz, the hub's to 150 MHz");
-	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3)) ||       /* 300 MHz / 1.5 */
-	    !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(4))) {       /* 300 MHz / 2 */
+	if (!clock_source("gmu_clk_src", GPUCC_GMU_RCGR, RCG_GPLL0_DIV(3))) {       /* 300 MHz / 1.5 */
+		return false;
+	}
+	/* (the SM8150's has no hub clocks: gpucc-sm8150.c ends at 0x1120 and has nothing at 0x117c, 0x1178, 0x1204 or 0x1170) */
+	if (gpu_model == &gpu_models[0] && !clock_source("hub_clk_src", GPUCC_HUB_RCGR, RCG_GPLL0_DIV(4))) {     /* 300 MHz / 2 */
 		return false;
 	}
 
 	announce("in the GPU's clock controller: the clocks of the GMU and of the SMMU on");
-	if (!clock_on(&gpucc, "cb", GPUCC_CB_CBCR, false) ||
-	    !clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
+	if (gpu_model == &gpu_models[0] &&
+	    (!clock_on(&gpucc, "cb", GPUCC_CB_CBCR, false) || !clock_on(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR, true) ||
+	    !clock_on(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR, true))) {
+		return false;
+	}
+	if (!clock_on(&gpucc, "cxo", GPUCC_CXO_CBCR, true) ||
 	    !clock_on(&gpucc, "ahb", GPUCC_AHB_CBCR, false) ||
-	    !clock_on(&gpucc, "hub_aon", GPUCC_HUB_AON_CBCR, true) ||
-	    !clock_on(&gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR, true) ||
 	    !clock_on(&gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true) ||
 	    !clock_on(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR, false)) {
 		return false;
+	}
+	if (gpu_model != &gpu_models[0]) {
+		/* the counter's debug-mux numbers are the POCO's (debugcc-yupik.c): not measured on this phone yet */
+		printf("adreno: %u: the clocks' rates are not measured on this phone\n", step);
+		return true;
 	}
 	return measure_clocks();
 }
@@ -869,6 +905,18 @@ cx_ready(void)
 		    cx_is_on() ? "on" : "off", gmu_clock);
 		return false;
 	}
+	if (gpu_model != &gpu_models[0]) {
+		/* no counter here yet (its debug-mux numbers are the POCO's): the register bus's clock is taken at its control register's word */
+		uint32_t ahb = rd(gpucc.base + GPUCC_AHB_CBCR);
+
+		if ((ahb & (CBCR_ENABLE | CBCR_OFF)) != CBCR_ENABLE) {
+			printf("adreno: %u: the GPU block's register bus clock (ahb) is not on (%#x): step 5\n", step, ahb);
+			return false;
+		}
+		printf("adreno: %u: the GPU block's register bus clock (ahb) is on by its control register (%#x), not measured\n", step,
+		    ahb);
+		return true;
+	}
 	ahb_hz = measure_quietly(GPUCC_DEBUG_AHB);
 	if (ahb_hz == MEASURE_FAILED) {
 		printf("adreno: %u: the frequency counter did not finish (step 5 shows whether it works)\n", step);
@@ -961,8 +1009,10 @@ step_first_words(void)
 	get(&gbif, "scache_cntl0", GBIF_SCACHE_CNTL0);
 	get(&gbif, "halt", GBIF_HALT);
 	get(&gbif, "halt_ack", GBIF_HALT_ACK);
-	get(&cx_misc, "system_cache_cntl_0", CX_MISC_SYSTEM_CACHE_CNTL_0);
-	get(&cx_misc, "system_cache_cntl_1", CX_MISC_SYSTEM_CACHE_CNTL_1);
+	if (gpu_model == &gpu_models[0]) {              /* (the SM8150's GPU has no such block in its device tree) */
+		get(&cx_misc, "system_cache_cntl_0", CX_MISC_SYSTEM_CACHE_CNTL_0);
+		get(&cx_misc, "system_cache_cntl_1", CX_MISC_SYSTEM_CACHE_CNTL_1);
+	}
 	return true;
 }
 
@@ -1648,7 +1698,7 @@ zap_header(uint64_t *phys)
 	uint64_t size = 0;
 	uint32_t segments, hashes;
 
-	header = image_file("fw", "a660_zap.mdt", &size);
+	header = image_file("fw", gpu_model->zap_header, &size);
 	if (header == NULL) {
 		return false;
 	}
@@ -1744,7 +1794,7 @@ step_gmu_space(void)
 		return false;
 	}
 	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
-	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
+	gmu_firmware = image_file("fw", gpu_model->gmu_firmware, &gmu_firmware_size);
 	if (gmu_firmware == NULL) {
 		return false;
 	}
@@ -2567,7 +2617,7 @@ step_core_space(void)
 	}
 	PE_parse_boot_argn("adreno_stream1", &stream1, sizeof(stream1));
 	announce("make the 3D core's memory: its ring, its microcode (fw/a660_sqe.fw), a page to try writing to");
-	microcode = image_file("fw", "a660_sqe.fw", &size);
+	microcode = image_file("fw", gpu_model->sqe_firmware, &size);
 	if (microcode == NULL || size < 8 || size > 0x40000 ||
 	    !block_new(&core_space, &core_ring, CORE_RING_ADDRESS, CORE_RING_SIZE, PTE_CORE) ||
 	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)size - 4, PTE_CORE | PTE_READ_ONLY) ||
@@ -2651,7 +2701,7 @@ step_zap_load(void)
 	announce("ask TrustZone to give up a zap shader that a kernel before this one may have left");
 	printf("adreno: %u: %s\n", step, zap_unload() ? "TrustZone has given up what it had (it says so with none, too)" :
 	    "TRUSTZONE DOES NOT GIVE IT UP: the next answers tell whether it keeps one");
-	segment = image_file("fw", "a660_zap.b02", &size);
+	segment = image_file("fw", gpu_model->zap_segment, &size);
 	if (segment == NULL || size == 0 || size > 0x1000) {
 		return false;
 	}
@@ -3725,7 +3775,7 @@ extern vm_offset_t pe_arm_get_soc_base_phys(void);
 static bool
 start_by_itself(void)
 {
-	static const char *const files[] = { "a660_gmu.bin", "a660_sqe.fw", "a660_zap.mdt", "a660_zap.b02" };
+	const char *const files[] = { gpu_model->gmu_firmware, gpu_model->sqe_firmware, gpu_model->zap_header, gpu_model->zap_segment };
 	const char *missing = NULL;
 	uint64_t size;
 
@@ -3753,6 +3803,36 @@ start_by_itself(void)
  * as long as the steps and the watch after them last, nothing else writes to the log, so that
  * its end -- all that the loader's notes keep -- is about what is being done here.
  */
+/* Point the blocks at this phone's. Without a known phone (QEMU) the POCO's stay, and nothing is touched anyway. */
+static void
+select_model(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) != kSuccess) {
+		return;
+	}
+	for (unsigned i = 0; i < sizeof(gpu_models) / sizeof(gpu_models[0]); i++) {
+		if (strcmp((const char *)prop, gpu_models[i].name) == 0) {
+			gpu_model = &gpu_models[i];
+		}
+	}
+	gpu.phys = gpu_model->gpu;
+	gbif.phys = gpu_model->gpu + 4 * 0x3c00;
+	gpucc.phys = gpu_model->gpucc;
+	gmu.phys = gpu_model->gmu;
+	gmu.size = gpu_model->gmu_size;
+	smmu.phys = gpu_model->smmu;
+	smmu.size = gpu_model->smmu_size;
+	pdc.phys = gpu_model->pdc;
+	cx_misc.phys = gpu_model->cx_misc;
+	rscc.phys = gpu_model->rscc;
+	printf("adreno: the phone is a %s\n", gpu_model->name);
+}
+
 void
 hakios_adreno_init(void)
 {
@@ -3765,6 +3845,7 @@ hakios_adreno_init(void)
 	uint32_t only = 0, done = 0, failed = 0, keep = 0;
 	bool by_itself = false;
 
+	select_model();
 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
 		display_probe();
 	}

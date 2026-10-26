@@ -171,3 +171,24 @@ while Android, a moment later, said 100%, 4.35 V, 36.5 C, charging. State of cha
 (the gauge reads 99 where Android rounds to 100); the temperature (25 C against 36.5 C) and the current (-104 mA against
 +385 mA, different loads and perhaps a different sign convention) do not, so the loader's layout for those two on the SM8150
 is unconfirmed (the offsets were confirmed on the POCO only). Run with `battery=1` among the arguments.
+
+## GPU (Adreno 640): steps 1-9 proven (2026-10-26)
+
+`bsd/dev/hakios.adreno.c` is now model-aware: a table (`gpu_models[]`) of the blocks and firmware names that differ, chosen by
+the loader's `/arm-io` `device_type` (`redwood` or `raphael`), so the POCO's driver and the iokit side (`hakios_gpu_*`) stay
+one piece. Run the bring-up by steps with the small image: `XL_RAMDISK=prebuilt/userland/hello XL_CMDLINE="debug=0x8
+rd=md0 adreno=N adreno_pause=1500 adreno_watch=15 adreno_return=1 cpus=1" ./xl run` (N = 9 so far: each step names what it
+is about to touch, reads come before writes, the kernel log comes back with the run). Found on this phone:
+
+| What | Value |
+|---|---|
+| Blocks | GPU `0x2C00000`, GPU clock controller `0x2C90000`, GMU `0x2C6A000` (`0x30000`), GMU RSC at GMU `+0x23000` (`0x2C8D000`), SMMU `0x2CA0000` (5 contexts), PDC `0xB280000`; no separate CX-misc block |
+| Command database | `0x85F20000` (RPMh: `gfx.lvl`, `cx.lvl`, `mx.lvl` found, with their levels) |
+| GCC | the GPU's GPLL0 gates are bits 15 and 16 of the vote register `0x52004` (the POCO's is `0x52000`); `gpu_cfg_ahb 0x71004`, `memnoc_gfx 0x7100c`, `snoc_dvm_gfx 0x71018`, `ddrss_gpu_axi 0x71154` |
+| GPU clock controller | no hub or `cb` clocks (nothing at `0x1170`, `0x1178`, `0x117c`, `0x1204`); GMU clock source `0x1120` takes `0x602` (GPLL0/1.5, 200 MHz) as on the POCO |
+| Firmware | `a640_gmu.bin`, `a630_sqe.fw`, `a640_zap.mdt` + `a640_zap.b02` (from `fw-gpu/`) |
+
+Step 4 powers the CX switch (`cx_gdscr` becomes `0xf8222000`); step 6 reads the GMU's always-on counter at 19.199 MHz, so the
+GPU block is alive and the hypervisor lets the kernel read the GMU and the bus interface. Not done: the GPU's fuses (the POCO's cells
+are meaningless here), the clock-rate measurement (its debug-mux numbers are the POCO's), and steps 10 to 22 (GMU firmware, HFI,
+the 3D core, the zap shader, a frame). The GMU firmware's message protocol (HFI) is the older generation's: expect differences there.
