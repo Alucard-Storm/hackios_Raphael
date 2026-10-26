@@ -39,3 +39,13 @@ if [ "$got" != "$(cat "$want")" ]; then
 	exit 1
 fi
 echo "soc-args-test: the generator reproduces all 16 POCO X5 Pro soc_* values, and soc.args matches"
+
+# the Redmi K20 Pro's soc.args must also be what the generator makes from its tree (soc_cmd_db is
+# appended by pull-soc.sh from /proc/iomem, the one value the tree does not carry)
+rdtb="$root/devices/raphael/prebuilt/device-tree.dtb"
+rgot=$(python3 "$root/tools/soc-args.py" "$rdtb")
+if [ "$rgot" != "$(grep -v '^soc_cmd_db=' "$root/devices/raphael/soc.args")" ]; then
+	echo "soc-args-test: FAIL -- devices/raphael/soc.args is out of step with the generator (regenerate it)"
+	exit 1
+fi
+echo "soc-args-test: devices/raphael/soc.args matches its device tree"

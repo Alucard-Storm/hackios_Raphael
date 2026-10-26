@@ -104,6 +104,11 @@ def main():
     if aoss is not None:
         args.append(('soc_aoss', aoss))
     block('qcom,rpmh-rsc', 'soc_rsc', cell=4)           # drv-2 (the application processors') is the third addr/size pair (reg-names drv-0/1/2)
+    if not any(a == 'soc_rsc' for a, _ in args):        # older SoCs: one qcom,tcs-drv node per DRV; the application processors' has qcom,drv-id = 2
+        for _, props in nodes.items():
+            if b'qcom,tcs-drv' in props.get('compatible', b'').split(b'\0') and props.get('qcom,drv-id') == b'\0\0\0\2' and 'reg' in props:
+                args.append(('soc_rsc', u32(props['reg'], 0)))
+                break
     _, smmu = find_named(nodes, 'apps-smmu')            # not by compatible: the GPU's SMMU shares qcom,qsmmu-v500
     if smmu and 'reg' in smmu:
         args.append(('soc_apps_smmu', u32(smmu['reg'], 0)))
@@ -116,14 +121,17 @@ def main():
         if 'phandle' in props:
             by_phandle[u32(props['phandle'])] = (path, props)
 
-    def reserved(leaf, arg):
-        _, props = find_named(nodes, leaf)
+    def reserved(leaf, arg, *alt):                      # alt: the names older SoCs' trees give the same region
+        for name in (leaf,) + alt:
+            _, props = find_named(nodes, name)
+            if props and 'reg' in props:
+                break
         if props and 'reg' in props:
             args.append((arg, u32(props['reg'], 1)))    # reserved-memory: 2 address cells, so the low word is cell 1
 
     reserved('cmd_db', 'soc_cmd_db')
-    reserved('mpss', 'soc_mpss_mem')
-    reserved('ipa_gsi', 'modem_ipa_fw_at')              # where the IPA's firmware is loaded (the ipa_gsi reservation)
+    reserved('mpss', 'soc_mpss_mem', 'modem_region')
+    reserved('ipa_gsi', 'modem_ipa_fw_at', 'pil_ipa_gsi_region')             # where the IPA's firmware is loaded (the ipa_gsi reservation)
     _, smem = find(nodes, 'qcom,smem')
     if smem and 'memory-region' in smem:
         target = by_phandle.get(u32(smem['memory-region']))
