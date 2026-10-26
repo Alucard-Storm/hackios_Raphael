@@ -561,6 +561,7 @@ struct platform {
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
+	uint32_t vtimer_intid;           /* the virtual timer's interrupt number when it is not the architecture's 27 (0: it is) */
 };
 
 static const struct platform platform_qemu_virt = {
@@ -595,6 +596,7 @@ static const struct platform platform_raphael = {
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
 	.cores = 8, .core_shift = 8,
 	.small_cores = 0x0f,
+	.vtimer_intid = 19,     /* Qualcomm's SM8150 numbers its timers 17 (secure physical), 18 (physical), 19 (virtual) */
 };
 
 /* Kryo 485 (SM8150): implementer 'Q', part 0x805 (Silver) or 0x804 (Gold/Prime) */
@@ -605,6 +607,7 @@ is_sm8150(void)
 	uint32_t part = (uint32_t)(midr >> 4) & 0xfff;
 	return ((midr >> 24) & 0xff) == 0x51 && (part == 0x805 || part == 0x804);
 }
+
 
 /* ------------------------------------------------------------------------ */
 
@@ -3448,6 +3451,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
 	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base, 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	if (plat->vtimer_intid != 0) {
+		dt_prop_u32(&w, "vtimer-intid", plat->vtimer_intid);
+	}
 	dt_end(&w);
 	if (plat->uart != 0) {
 		dt_begin(&w, "uart0");

@@ -72,11 +72,18 @@
 
 #define GIC_SGI_SIGNAL          0           /* cpu_signal(): another processor wants this one's attention */
 #define GIC_SGI_STOP            1           /* psci_smp_stop_here(): the system is going back to the boot loader */
-#define GIC_INTID_VTIMER        27          /* EL1 virtual timer PPI */
+#define GIC_INTID_VTIMER_STD    27          /* EL1 virtual timer PPI, as the architecture numbers it */
 #define GIC_INTID_SPI_MIN       32
 #define GIC_INTID_SPURIOUS_MIN  1020
 #define GIC_SPI_MOST            48          /* attached at a time */
 #define GIC_PRIORITY_DEFAULT    0xa0
+
+/*
+ * The virtual timer's interrupt number. Qualcomm's SM8150 wires the timers as INTIDs 17 (secure
+ * physical), 18 (physical) and 19 (virtual), not as 26..30; the boot loader says so in the device
+ * tree (/arm-io/gic, "vtimer-intid"), and without it the architecture's 27 is meant.
+ */
+static uint32_t GIC_INTID_VTIMER = GIC_INTID_VTIMER_STD;
 
 static vm_offset_t gicd_base, gicr_base;
 static vm_size_t   gicr_size;
@@ -418,7 +425,7 @@ gic_v3_irq_cpu_init(void)
 {
 	int cpu = cpu_number();
 	vm_offset_t gicr;
-	uint32_t mine = 1u << GIC_INTID_VTIMER;
+	uint32_t mine;
 
 	if (gicd_base == 0) {
 		DTEntry entry;
@@ -432,6 +439,13 @@ gic_v3_irq_cpu_init(void)
 		}
 		uint64_t const *reg = prop;
 		vm_offset_t soc_base = pe_arm_get_soc_base_phys();
+		void const *vt;
+		unsigned int vt_size;
+
+		if (SecureDTGetProperty(entry, "vtimer-intid", &vt, &vt_size) == kSuccess && vt_size >= sizeof(uint32_t) &&
+		    *(uint32_t const *)vt >= 16 && *(uint32_t const *)vt < 32) {
+			GIC_INTID_VTIMER = *(uint32_t const *)vt;
+		}
 
 		simple_lock_init(&gic_spi_lock, 0);
 		gicd_base = ml_io_map(soc_base + reg[0], reg[1]);
@@ -443,6 +457,8 @@ gic_v3_irq_cpu_init(void)
 	} else if (gicr_cpu_base[cpu] != 0) {
 		return;
 	}
+
+	mine = 1u << GIC_INTID_VTIMER;
 
 	/* System-register CPU interface */
 	__builtin_arm_wsr64("ICC_SRE_EL1", __builtin_arm_rsr64("ICC_SRE_EL1") | 1);
