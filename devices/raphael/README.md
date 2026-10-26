@@ -172,12 +172,12 @@ while Android, a moment later, said 100%, 4.35 V, 36.5 C, charging. State of cha
 +385 mA, different loads and perhaps a different sign convention) do not, so the loader's layout for those two on the SM8150
 is unconfirmed (the offsets were confirmed on the POCO only). Run with `battery=1` among the arguments.
 
-## GPU (Adreno 640): steps 1-9 proven (2026-10-26)
+## GPU (Adreno 640): steps 1-16 proven (2026-10-27)
 
 `bsd/dev/hakios.adreno.c` is now model-aware: a table (`gpu_models[]`) of the blocks and firmware names that differ, chosen by
 the loader's `/arm-io` `device_type` (`redwood` or `raphael`), so the POCO's driver and the iokit side (`hakios_gpu_*`) stay
 one piece. Run the bring-up by steps with the small image: `XL_RAMDISK=prebuilt/userland/hello XL_CMDLINE="debug=0x8
-rd=md0 adreno=N adreno_pause=1500 adreno_watch=15 adreno_return=1 cpus=1" ./xl run` (N = 9 so far: each step names what it
+rd=md0 adreno=N adreno_pause=1500 adreno_watch=15 adreno_return=1 cpus=1" ./xl run` (N = 16 so far: each step names what it
 is about to touch, reads come before writes, the kernel log comes back with the run). Found on this phone:
 
 | What | Value |
@@ -192,3 +192,19 @@ Step 4 powers the CX switch (`cx_gdscr` becomes `0xf8222000`); step 6 reads the 
 GPU block is alive and the hypervisor lets the kernel read the GMU and the bus interface. Not done: the GPU's fuses (the POCO's cells
 are meaningless here), the clock-rate measurement (its debug-mux numbers are the POCO's), and steps 10 to 22 (GMU firmware, HFI,
 the 3D core, the zap shader, a frame). The GMU firmware's message protocol (HFI) is the older generation's: expect differences there.
+
+Steps 10 to 16 (2026-10-27): the GMU's memory takes writes; TrustZone accepts the zap shader's signature from this kernel
+(image 13); the SMMU context for the GMU is programmed (streams as on the POCO: 0 and 1 the 3D core, 2 secure, 4 and 5 the GMU,
+mask `0x400`); the GMU firmware `a640_gmu.bin` (core `0x20000105`, power `0x20000012`, HFI `0x20000001`) loads and **runs**
+(`cm3_fw_init_result = 0xbabeface`); and its message queues come up. What differs from the POCO's (a660-class) driver, all in the
+`gpu_models[]` table and `legacy_gmu` branches of `bsd/dev/hakios.adreno.c`: the older GMU has a fixed memory map, not one the
+firmware asks for (instruction window at `0x4000`, data at `0x44000`, state at `0x60000000`; its data memory is at GMU address
+`0x40000`); it signals success with `0xbabeface`; the chip id it is given is `0x06040100`; and its RSC and PDC programs
+(`legacy_rpmh_ucode()`) are the vendor's for this generation and are loaded **before** the GMU starts.
+
+Two lessons that cost runs: use this phone's **own** device tree for addresses, not the Android source's (the GMU's PDC is at
+`0xB290000` and `0xB490000` here, the source says `0xB280000` and `0xB480000`: the wrong ones stall the system at the first
+access); and a watched run needs `hv_wdt_pet=1 bootcpu=7 cpus=8` among the arguments (the loader's hang detector reads the kernel's
+heartbeat, which needs another core to run), without which a healthy run is declared hung after 50 s. Without `bootcpu` nothing
+watches and a hang saves no log. Next: step 17 (the 3D core's power through the GMU's messages: the older firmware's protocol
+is HFI version 1), then the 3D core's microcode and zap shader, then a frame.

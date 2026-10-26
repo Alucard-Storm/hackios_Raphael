@@ -293,14 +293,18 @@ wait_for(struct block *b, uint32_t offset, uint32_t mask, uint32_t value, uint32
 struct gpu_model {
 	const char *name;                               /* /arm-io device_type */
 	uint32_t gpu, gpucc, gmu, gmu_size, smmu, smmu_size, pdc, cx_misc, rscc, cmd_db, pll_vote;
+	uint32_t pdc_seq;                               /* the sequence memory of the GPU's power domain controller, where it is a block of its own */
+	uint32_t gmu_dtcm;                              /* where the GMU's data memory is in its own address space */
+	uint32_t gmu_chip;                              /* the chip id the way the GMU's firmware wants it: core and major kept, minor in bits 15-12, patch in 11-8 */
+	bool legacy_gmu;                                /* the GMU of the Adreno 630/640: a fixed memory map, not one the firmware asks for */
 	const char *gmu_firmware, *sqe_firmware, *zap_header, *zap_segment;
 };
 
 static const struct gpu_model gpu_models[] = {
-	{ "redwood", 0x03d00000, 0x03d90000, 0x03d6a000, 0x34000, 0x03da0000, 0x20000, 0x0b290000, 0x03d9e000, 0x03de0000, 0x80860000, 0x52000,
+	{ "redwood", 0x03d00000, 0x03d90000, 0x03d6a000, 0x34000, 0x03da0000, 0x20000, 0x0b290000, 0x03d9e000, 0x03de0000, 0x80860000, 0x52000, 0, 0x10004000, 0x06035000, false,
 	  "a660_gmu.bin", "a660_sqe.fw", "a660_zap.mdt", "a660_zap.b02" },
-	{ "raphael", 0x02c00000, 0x02c90000, 0x02c6a000, 0x30000, 0x02ca0000, 0x10000, 0x0b280000, 0x02c9e000 /* ? */,
-	  0x02c8d000 /* ? */, 0x85f20000, 0x52004, "a640_gmu.bin", "a630_sqe.fw", "a640_zap.mdt", "a640_zap.b02" },
+	{ "raphael", 0x02c00000, 0x02c90000, 0x02c6a000, 0x30000, 0x02ca0000, 0x10000, 0x0b290000, 0x02c9e000 /* ? */,
+	  0x02c8d000 /* ? */, 0x85f20000, 0x52004, 0x0b490000, 0x00040000, 0x06040100 /* qcom,chipid 0x06040001 */, true, "a640_gmu.bin", "a630_sqe.fw", "a640_zap.mdt", "a640_zap.b02" },
 };
 static const struct gpu_model *gpu_model = &gpu_models[0];
 
@@ -1759,7 +1763,7 @@ step_zap_signature(void)
  * message protocol ("HFI").
  */
 #define GMU_ITCM_ADDRESS        0x00000000u
-#define GMU_DTCM_ADDRESS        0x10004000u     /* a6xx_gmu_fw_load: the 650 family's */
+#define GMU_DTCM_ADDRESS        (gpu_model->gmu_dtcm)    /* a6xx_gmu_fw_load: the 650 family's is 0x10004000, the 630/640's 0x40000 */
 #define GMU_TCM_SIZE            0x4000u
 #define GMU_LOG_ADDRESS         0x60002000u     /* after the two pages the firmware asks for at 0x60000000 */
 #define GMU_LOG_SIZE            0x4000u
@@ -1816,6 +1820,25 @@ step_gmu_space(void)
 		    PTE_GMU)) {
 			printf("adreno: %u: cannot make %#x bytes at %#x for the firmware\n", step, block.value, block.address);
 			return false;
+		}
+	}
+	if (gpu_model->legacy_gmu) {
+		/*
+		 * The Adreno 630/640's GMU asks for nothing: its memory is a fixed map (the vendor's kgsl_gmu.c, gmu_vma): two
+		 * pages at 0x60000000 that it keeps its state in, and the windows its code (from 0x4000) and data (from
+		 * 0x44000) caches fill from, 240K each. The firmware file puts the code beyond its first 16K at 0x4000 and a
+		 * block of data at 0x57000 there.
+		 */
+		static const struct {
+			uint32_t address, size;
+		} fixed[] = { { 0x60000000, 0x2000 }, { 0x4000, 0x3c000 }, { 0x44000, 0x3c000 } };
+
+		for (unsigned i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) {
+			if (gmu_block_count == sizeof(gmu_blocks) / sizeof(gmu_blocks[0]) ||
+			    !block_new(&gmu_space, &gmu_blocks[gmu_block_count++], fixed[i].address, fixed[i].size, PTE_GMU)) {
+				printf("adreno: %u: cannot make %#x bytes at %#x for the GMU\n", step, fixed[i].size, fixed[i].address);
+				return false;
+			}
 		}
 	}
 	if (!block_new(&gmu_space, &gmu_log, GMU_LOG_ADDRESS, GMU_LOG_SIZE, PTE_GMU) ||
@@ -1947,6 +1970,81 @@ struct hfi_table {
 
 static volatile struct hfi_table *hfi;  /* the uncached view */
 
+static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu "kgsl_gmu_pdc_cfg" */
+static struct block pdc_seq = { "pdc_seq", 0x0b490000, 0x10000 };      /* dt: "kgsl_gmu_pdc_seq" (the Redmi K20 Pro's only; the phone's own device tree, not the Android source's 0xb280000/0xb480000) */
+#define PDC_GPU_ENABLE          (4 * 0x1140)
+#define PDC_GPU_SEQ_START_ADDR  (4 * 0x1148)
+#define RSCC_PDC_SEQ_START_ADDR (4 * 0x008)
+#define RSCC_PDC_MATCH_VALUE_LO (4 * 0x009)
+#define RSCC_PDC_MATCH_VALUE_HI (4 * 0x00a)
+#define RSCC_HIDDEN_TCS_CMD0_ADDR (4 * 0x00d)
+#define RSCC_HIDDEN_TCS_CMD0_DATA (4 * 0x00e)
+#define RSCC_OVERRIDE_START_ADDR (4 * 0x100)
+
+/*
+ * The Adreno 630/640's GMU needs its RPMh programs in place before its firmware runs: the vendor's driver
+ * (adreno_a6xx_gmu.c, _load_gmu_rpmh_ucode) loads them first, and written while the firmware runs they hang the
+ * register bus (seen on the Redmi K20 Pro: the write of the RSC sequencer's third word never came back). Called from
+ * step 15, with the GMU's processor still held in reset.
+ */
+static void
+legacy_rpmh_ucode(void)
+{
+	/*
+	 * The Adreno 630/640's vendor driver (adreno_a6xx_gmu.c, _load_gmu_rpmh_ucode) programs both sequencers in full,
+	 * the GMU's RSC and the GPU's PDC, with the microcode and command slots of its generation. Words, in its order.
+	 */
+	static const uint32_t rsc_program[5] = { 0xa7a506a0, 0xa1e6a6e7, 0xa2e081e1, 0xe9a982e2, 0x0020e8a8 };
+	static const uint32_t pdc_program[5] = { 0xfebea1e1, 0xa5a4a3a2, 0x8382a6e0, 0xbce3e284, 0x002081fc };
+	/* (the commands' addresses are RPMh's: 0x30010 mx.lvl, 0x30000 cx.lvl, 0x30090 the GPU's rail on this SoC) */
+	static const struct {
+		uint32_t control, enable, wait, msgid;  /* word offsets in the PDC's configuration block */
+		uint32_t address[3], data[3];
+	} tcs[2] = {
+		{ 0x1572, 0x1573, 0x1574, 0x1575, { 0x30010, 0x30000, 0x30090 }, { 1, 0, 0 } },
+		{ 0x15d6, 0x15d7, 0x15d8, 0x15d9, { 0x30010, 0x30000, 0x30090 }, { 2, 3, 3 } },
+	};
+
+	announce("give the GMU's RPMh channel and the GPU's power domain sequencer their programs, as the vendor's driver "
+	    "does for this GPU (rscc, pdc, pdc_seq)");
+	put(&rscc, "rsc_status0_drv0", RSCC_RSC_STATUS0_DRV0, 1u << 24);
+	put(&rscc, "pdc_slave_id_drv0", RSCC_PDC_SLAVE_ID_DRV0, 1);
+	put(&rscc, "hidden_tcs_cmd0_data", RSCC_HIDDEN_TCS_CMD0_DATA, 0);
+	put(&rscc, "hidden_tcs_cmd0_addr", RSCC_HIDDEN_TCS_CMD0_ADDR, 0);
+	put(&rscc, "hidden_tcs_cmd1_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 2, 0);
+	put(&rscc, "hidden_tcs_cmd1_addr", RSCC_HIDDEN_TCS_CMD0_ADDR + 4 * 2, 0);
+	put(&rscc, "hidden_tcs_cmd2_data", RSCC_HIDDEN_TCS_CMD0_DATA + 4 * 4, 0x80000000);      /* (a650 and later: 0x80000021) */
+	put(&rscc, "hidden_tcs_cmd2_addr", RSCC_HIDDEN_TCS_CMD0_ADDR + 4 * 4, 0);
+	put(&rscc, "override_start_addr", RSCC_OVERRIDE_START_ADDR, 0);
+	put(&rscc, "pdc_seq_start_addr", RSCC_PDC_SEQ_START_ADDR, 0x4520);
+	put(&rscc, "pdc_match_value_lo", RSCC_PDC_MATCH_VALUE_LO, 0x4510);
+	put(&rscc, "pdc_match_value_hi", RSCC_PDC_MATCH_VALUE_HI, 0x4514);
+	for (unsigned i = 0; i < 5; i++) {
+		put(&rscc, "seq_mem_drv0", RSCC_SEQ_MEM_0_DRV0 + 4 * i, rsc_program[i]);
+	}
+	/* looks first: whether the PDC answers a read at all tells a blocked write from a blocked block */
+	get(&pdc, "gpu_enable", PDC_GPU_ENABLE);
+	get(&pdc, "gpu_seq_start_addr", PDC_GPU_SEQ_START_ADDR);
+	get(&pdc, "tcs1 enable_bank", 4 * tcs[0].enable);
+	get(&pdc_seq, "gpu_seq_mem 0", 0);
+	get(&pdc_seq, "gpu_seq_mem 1", 4);
+	for (unsigned i = 0; i < 5; i++) {
+		put(&pdc_seq, "gpu_seq_mem", 4 * i, pdc_program[i]);
+	}
+	for (unsigned t = 0; t < 2; t++) {
+		put(&pdc, "tcs enable_bank", 4 * tcs[t].enable, 7);
+		put(&pdc, "tcs wait_for_cmpl_bank", 4 * tcs[t].wait, 0);
+		put(&pdc, "tcs control", 4 * tcs[t].control, 0);
+		for (unsigned c = 0; c < 3; c++) {
+			put(&pdc, "tcs cmd msgid", 4 * (tcs[t].msgid + 4 * c), 0x10108);
+			put(&pdc, "tcs cmd addr", 4 * (tcs[t].msgid + 1 + 4 * c), tcs[t].address[c]);
+			put(&pdc, "tcs cmd data", 4 * (tcs[t].msgid + 2 + 4 * c), tcs[t].data[c]);
+		}
+	}
+	put(&pdc, "gpu_seq_start_addr", PDC_GPU_SEQ_START_ADDR, 0);
+	put(&pdc, "gpu_enable", PDC_GPU_ENABLE, 0x80000001);
+}
+
 /*
  * Everything the vendor's driver writes before it lets the processor go (a6xx_gmu_register_config,
  * a6xx_gmu_power_config), in its order; then out of reset (a6xx_gmu_device_start).
@@ -1999,6 +2097,9 @@ step_gmu_start(void)
 		get(&rscc, "seq_busy_drv0", RSCC_SEQ_BUSY_DRV0);
 	}
 	rsc_awake = true;
+	if (gpu_model->legacy_gmu) {
+		legacy_rpmh_ucode();
+	}
 	put(&gmu, "cx_falnext_intf", GMU_CX_FALNEXT_INTF, 1);
 	put(&gmu, "cx_fal_intf", GMU_CX_FAL_INTF, 1);
 	put(&gmu, "general_7", GMU_GENERAL_7, 1);
@@ -2010,7 +2111,7 @@ step_gmu_start(void)
 	put(&gmu, "cm3_cfg", GMU_CM3_CFG, 0x4052);
 	put(&gbif, "halt", GBIF_HALT, 0);
 	put(&gmu, "pwr_col_cp_resp", GMU_PWR_COL_CP_RESP, 0);
-	put(&gmu, "hfi_sfr_addr", GMU_HFI_SFR_ADDR, GMU_CHIP);
+	put(&gmu, "hfi_sfr_addr", GMU_HFI_SFR_ADDR, gpu_model->gmu_chip);
 	put(&gmu, "pwr_col_cp_msg", GMU_PWR_COL_CP_MSG, GMU_LOG_ADDRESS | (GMU_LOG_SIZE / 4096 - 1));
 	put(&gmu, "sys_bus_config", GMU_SYS_BUS_CONFIG, 1);
 	put(&gmu, "icache_config", GMU_ICACHE_CONFIG, 1);
@@ -2021,7 +2122,9 @@ step_gmu_start(void)
 
 	gmu_runs = true;
 	put(&gmu, "cm3_sysreset", GMU_CM3_SYSRESET, 0);
-	for (int i = 0; i < 5000 && (result & GMU_STARTED_MASK) != GMU_STARTED && !(result & GMU_FAILED); i++) {
+	/* the older firmware says 0xbabeface and nothing else; the newer one a mask of bits (see GMU_STARTED_MASK) */
+#define GMU_UP(result) (gpu_model->legacy_gmu ? (result) == 0xbabefaceu : ((result) & GMU_STARTED_MASK) == GMU_STARTED)
+	for (int i = 0; i < 5000 && !GMU_UP(result) && (gpu_model->legacy_gmu || !(result & GMU_FAILED)); i++) {
 		sleep_us(100);
 		result = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
 	}
@@ -2029,7 +2132,7 @@ step_gmu_start(void)
 	get(&gmu, "gmu2host_intr_info", GMU_GMU2HOST_INTR_INFO);
 	get(&gmu, "ao_host_interrupt_status", GMU_AO_HOST_INTERRUPT_STATUS);
 	get(&gmu, "hfi_ctrl_status", GMU_HFI_CTRL_STATUS);
-	if (space_faulted(&gmu_space) || (result & GMU_STARTED_MASK) != GMU_STARTED) {
+	if (space_faulted(&gmu_space) || !GMU_UP(result)) {
 		printf("adreno: %u: the GMU's firmware does not come up\n", step);
 		gmu_post_mortem();
 		return false;
@@ -2047,15 +2150,6 @@ step_gmu_start(void)
  * little program (vendor's a6xx_load_pdc_ucode with pdc_in_aop, a6xx_load_rsc_ucode: after the
  * firmware has started and before the message queues are).
  */
-static struct block pdc = { "pdc", 0x0b290000, 0x10000 };       /* dt: qcom,gmu "kgsl_gmu_pdc_cfg" */
-#define PDC_GPU_ENABLE          (4 * 0x1140)
-#define PDC_GPU_SEQ_START_ADDR  (4 * 0x1148)
-#define RSCC_PDC_SEQ_START_ADDR (4 * 0x008)
-#define RSCC_PDC_MATCH_VALUE_LO (4 * 0x009)
-#define RSCC_PDC_MATCH_VALUE_HI (4 * 0x00a)
-#define RSCC_HIDDEN_TCS_CMD0_ADDR (4 * 0x00d)
-#define RSCC_HIDDEN_TCS_CMD0_DATA (4 * 0x00e)
-#define RSCC_OVERRIDE_START_ADDR (4 * 0x100)
 
 static bool
 step_gmu_queues(void)
@@ -2064,6 +2158,9 @@ step_gmu_queues(void)
 
 	if (!cx_ready() || !gmu_runs) {
 		return false;
+	}
+	if (gpu_model->legacy_gmu) {
+		goto programmed;                /* (done in step 15, before the GMU starts, as the vendor's driver does) */
 	}
 	announce("enable the GPU's part of the always-on sequencer (pdc, 0xb294500 and 0xb294520: a part of the SoC not "
 	    "touched before)");
@@ -3830,6 +3927,7 @@ select_model(void)
 	pdc.phys = gpu_model->pdc;
 	cx_misc.phys = gpu_model->cx_misc;
 	rscc.phys = gpu_model->rscc;
+	pdc_seq.phys = gpu_model->pdc_seq;
 	printf("adreno: the phone is a %s\n", gpu_model->name);
 }
 
