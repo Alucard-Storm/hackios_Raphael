@@ -1,7 +1,7 @@
 # Device: Redmi K20 Pro (raphael)
 
-**Work in progress.** The UEFI and the XNU loader run on the phone; the kernel has not been tried and its
-drivers are still the POCO's. What exists is
+**Work in progress.** The UEFI and the XNU loader run on the phone, and the kernel boots to user space (the
+`hello` image prints "Hello from user space on Darwin!" on all 8 cores, see below); its drivers are still the POCO's. What exists is
 the phone's data (device tree, SoC arguments, firmware pull) and the list of what has to change in
 the drivers. The first phone, `devices/poco-x5-pro/`, is the worked example.
 
@@ -80,3 +80,24 @@ nabu, vayu, with `FD_BASE=0xCE000000`), and the working image above comes from a
 `SurfaceDuo1Pkg` fork whose source I did not find (`WOA-Project/mu_andromeda_platforms` has no raphael).
 `uefi/apply.sh` makes `raphaelPkg` that way. Still to do for it: its `MemoryMapLib` (from the live device tree's /memory and
 reserved-memory), its SMBIOS names, `Resources/DTBs/raphael.dtb`, and a `Resources/Configs/raphael.toml`.
+
+## Kernel on raphael: the timer interrupt
+
+The kernel boots here as far as `hello` as process 1 (`XL_RAMDISK=prebuilt/userland/hello`, boot-args
+`-v debug=0x8 rd=md0 cpus=8`; no `ufs=`, `cpufreq=` or other POCO drivers). One thing had to change: Qualcomm's
+SM8150 wires its timers as GIC INTIDs 17 (secure physical), 18 (physical) and 19 (**virtual**), not the
+architecture's 26-30, so the kernel's "virtual timer on PPI 27" never got a tick: every timeout (thread calls,
+`loader_return_after`, sleeps) waited forever and the boot stalled after the network init. Found by reading
+this UEFI's own timer numbers (`HanaPkg.dsc.inc`) against the redistributor's pending bits (19 and 28 set
+while the virtual timer's condition was met, 27 never).
+
+- Source: `gic_v3_irq.c` reads `vtimer-intid` from `/arm-io/gic` (default 27, so the POCO is unchanged); the
+  loader's `platform_raphael` writes 19 there.
+- Until the prebuilt kernel is rebuilt from that source (this needs theos and the iOS 16.5 SDK, `xnu-deps/setup.sh`),
+  `devices/raphael/tools/patch-kernel.py` makes `mach.raphael` from `prebuilt/mach.development.bcm2837` with the
+  five instructions that carry the 27 changed; `xl` uses `mach.$DEVICE` when it exists. Boot-test of that
+  patched kernel: returned to the loader after the 20 s of `loader_return_after`, log with `hello`'s output.
+- Not checked yet: that the kernel built from the changed source reads the property (the loader side and the
+  patched binary were run, the rebuilt kernel was not).
+- Also learned: the loader cannot read the kernel's log when it hangs (no log partition on this phone, 0 bytes);
+  the screen (`-v`) is the only view of a hang. `ICC_HPPIR*_EL1` reads make this firmware reset the phone.

@@ -58,6 +58,9 @@ cd "$(dirname "$(readlink -f "$0")")" || exit 1
 # the kernel and the loader built here, or else the ones that come with the repository
 K=hakios-kernel                 # make kernel makes it
 [ -f $K ] || K=prebuilt/hakios-kernel
+# a kernel made for this device (devices/raphael/tools/patch-kernel.py makes mach.raphael) wins over both
+[ -f "mach.${DEVICE:-}" ] && [ -n "${DEVICE:-}" ] && K=mach.$DEVICE
+[ -n "${XL_KERNEL:-}" ] && K=$XL_KERNEL
 L=xnuloader/loader.efi
 if [ ! -f $L ]; then
 	L=prebuilt/loader.efi
