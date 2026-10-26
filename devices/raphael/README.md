@@ -101,3 +101,28 @@ while the virtual timer's condition was met, 27 never).
   patched binary were run, the rebuilt kernel was not).
 - Also learned: the loader cannot read the kernel's log when it hangs (no log partition on this phone, 0 bytes);
   the screen (`-v`) is the only view of a hang. `ICC_HPPIR*_EL1` reads make this firmware reset the phone.
+
+## iOS 16.5 on raphael (2026-10-26)
+
+With the pieces above, the stock iOS 16.5 user space boots to the home screen (SpringBoard, the stock apps'
+icons, the dock), drawn in software: no GPU driver, no touch (the Goodix GT988x is on I2C, address 0x5d on the
+bus at 0xc88000, and its supplies are plain GPIOs; the POCO's SPI/RPMh driver does not apply), no sound,
+no cellular or Wi-Fi. What it took, from the top of the repository with `DEVICE=raphael`:
+
+```sh
+sysimage/fetch.sh                                   # the IPSW parts from Apple (needs 7-Zip 23+)
+PREBUILT=1 REST=1 userland/build.sh                 # the images, with the prebuilt programs (no iOS SDK here)
+xnuloader/mkidentity.sh && xnuloader/build.sh       # the loader with the real identity (needs the `lzfse` tool)
+devices/raphael/tools/patch-kernel.py               # mach.raphael: the SM8150's timer interrupt (see above)
+./xl enter && ./xl ramdisk userland/system.apfs     # the system image into the phone's RAM (~90 s), once per loader session
+XL_CMDLINE="debug=0x8 rd=md0 hv_wdt_pet=1 cpus=8 ufs=2" XL_SECS=900 ./xl run
+```
+
+Leave `-v` out of the arguments for a clean screen (it makes the kernel's console draw over the UI), and
+leave out the POCO's `gpu=`, `touchscreen=`, `wifi=`, `modem=`, `haptic=`, `adsp=`, `sound=` and `cpufreq=`.
+The system image is lost whenever the phone restarts into Android: upload it again before the next run.
+
+Two build-environment traps that cost a run each: the images take the files' permission bits, and launchd
+refuses a plist that is group-writable (`error = 122: Path had bad ownership/permissions`), so the build now
+sets `umask 022` (a Linux user's default umask is 002); and `mkidentity.sh` needs an LZFSE decoder, which
+Ubuntu has as the `lzfse` package.
