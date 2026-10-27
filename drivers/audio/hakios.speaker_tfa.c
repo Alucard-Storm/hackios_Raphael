@@ -3,8 +3,11 @@
  * audio DSP's quaternary MI2S interface (hakios.sound.c, mi2s). The POCO's amplifiers are different chips
  * (hakios.speaker.c); this file is this phone's. Only with boot-arg tfa=N, and only on this phone:
  *
- *   tfa=1   a look, reading only: the chip is let out of reset (GPIO 59 low, as Android leaves it) and answers over
- *           I2C or not; its identity and a few of its registers are logged
+ *   tfa=1   a look, reading only: the chip is let out of reset (GPIO 59 pulsed high, then low, as Android's driver
+ *           does) and answers over I2C or not; its identity and a few of its registers are logged
+ *   tfa=2   ... and configured as Android's driver does at a cold start (every write read back); it stays in power
+ *           down. With sound=3 or 4 (hakios.sound.c) the same code is the amplifier behind the speaker interface
+ *           (hakios_speaker_*): powered up once the MI2S clock runs, the amplifier enabled, the gain lowered.
  *
  * Every address belongs to this phone, from its device tree (qupv3_se1_i2c at 0x884000, pins gpio114 SDA and gpio115 SCL
  * function qup1, reset-gpio 59, irq-gpio 141), Android's kernel (techpack/audio/asoc/codecs/tfa98xx, the machine driver
@@ -349,39 +352,343 @@ show_registers(const char *what, unsigned from, unsigned to)
 	say("%s\n", line);
 }
 
-static uint32_t level;
+/* a bit field of the chip as the driver's tables have it: register << 8 | position << 4 | length - 1 */
+#define BF_PWDN         0x0000
+#define BF_AMPE         0x0030
+#define BF_DCA          0x0040
+#define BF_MANSCONF     0x0120
+#define BF_AUDFS        0x0203
+#define BF_INPLEV       0x0240
+#define BF_TDMNBCK      0x20c3
+#define BF_TDMSLLN      0x2144
+#define BF_TDMSSIZE     0x2224
+#define BF_TDMSPKG      0x6163
+
+#define REG_STATUS      0x10            /* sticky alarms: clear on read */
+#define STATUS_OTDS     (1u << 2)
+#define STATUS_OCDS     (1u << 3)
+#define STATUS_UVDS     (1u << 4)
+#define STATUS_NOCLK    (1u << 7)
+#define REG_STATUS2     0x11            /* [7] clocks stable, [6] PLL lock, [12] MTP busy, [15] references */
+#define STATUS2_CLKS    (1u << 7)
+#define STATUS2_PLLS    (1u << 6)
+#define STATUS2_MTPB    (1u << 12)
+#define REG_STATE       0x14            /* [3:0] the device manager's state */
+#define REV_V1_14       0x0c74
+
+static bool broken, prepared, started;
 
 static void
-tfa_thread(__unused void *parameter, __unused wait_result_t result)
+give_up(const char *why)
+{
+	if (!broken) {
+		broken = true;
+		say("tfa: %s: the amplifier is given up on for the rest of the run\n", why);
+	}
+}
+
+static bool
+reg_write(uint8_t reg, uint16_t value)
+{
+	uint8_t message[3] = { reg, (uint8_t)(value >> 8), (uint8_t)value };
+
+	return geni_i2c_xfer(message, NULL, 3, false);
+}
+
+/* one bit field written (read-modify-write) and read back */
+static bool
+bf_set(uint16_t bf, uint16_t value)
+{
+	uint8_t reg = (uint8_t)(bf >> 8), pos = (bf >> 4) & 15, len = (uint8_t)((bf & 15) + 1);
+	uint16_t old, mask = (uint16_t)(((1u << len) - 1) << pos), now;
+
+	if (!reg_read(reg, &old)) {
+		return false;
+	}
+	now = (uint16_t)((old & ~mask) | ((value << pos) & mask));
+	if (!reg_write(reg, now)) {
+		return false;
+	}
+	/* (the unlock keys and a few registers do not read back as written: only the fields' own bits are looked at) */
+	if (reg != 0x0f && reg != 0xa0 && reg != 0xa1) {
+		uint16_t back;
+
+		if (!reg_read(reg, &back) || (back & mask) != (now & mask)) {
+			say("tfa: register %#04x field %#06x: wrote %#06x, reads %#06x\n", reg, bf, now, back);
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * The chip's configuration, in the order Android's driver makes it (tfaRunStartup): the rev-specific settings of its
+ * tfa9874_specific() (this chip is 0x0c74, "V1.14"), then the container's device list (tfa98xx.cnt: three registers,
+ * 33 bit fields) and the first items of the "speaker" profile, then the interface's word size for 16 bits (the port
+ * of hakios.sound.c: 16-bit slots, 48 kHz). The chip stays in power down.
+ */
+static const struct {
+	uint8_t reg;
+	uint16_t value;
+} rev_0c74[] = {
+	{ 0x02, 0x22c8 }, { 0x52, 0x57dc }, { 0x53, 0x003e }, { 0x56, 0x0400 }, { 0x61, 0x0110 }, { 0x6f, 0x00a5 },
+	{ 0x70, 0x07f8 }, { 0x73, 0x0047 }, { 0x74, 0x5098 }, { 0x75, 0x8d28 }, { 0x80, 0x0000 }, { 0x83, 0x0799 },
+	{ 0x84, 0x0081 },
+};
+
+/* the container's device list, bit fields: field code, value (tfa98xx.cnt) */
+static const struct {
+	uint16_t bf, value;
+} cnt_fields[] = {
+	{ 0x2103, 0x1 }, { 0x2330, 0x1 }, { 0x2340, 0x1 }, { 0x2603, 0x0 }, { 0x26c3, 0x1 }, { 0x2703, 0x0 }, { 0x6802, 0x2 },
+	{ 0x6831, 0x1 }, { 0x6851, 0x2 }, { 0x0255, 0xf }, { 0x64e1, 0x1 }, { 0x7430, 0x1 }, { 0x8801, 0x2 }, { 0x7494, 0x8 },
+	{ 0x8f00, 0x0 }, { 0x74f0, 0x0 }, { 0x7071, 0x3 }, { 0xc4d0, 0x0 }, { 0x6600, 0x0 }, { 0x5844, 0x1 }, { 0x6f72, 0x1 },
+	{ 0x8510, 0x1 }, { 0x8453, 0x4 }, { 0x6f50, 0x1 }, { 0x8305, 0x15 }, { 0x8364, 0x1c }, { 0xf8d2, 0x3 }, { 0x6163, 0x4 },
+	{ 0x6123, 0x4 }, { 0x7444, 0x9 }, { 0x7584, 0xd }, { 0x7695, 0x3f },
+};
+
+/* the profile "speaker"'s first items (before its list of defaults) */
+static const struct {
+	uint16_t bf, value;
+} profile_fields[] = {
+	{ BF_DCA, 1 }, { 0x64e1, 1 }, { 0x62e1, 0 }, { BF_AUDFS, 8 },
+};
+
+static bool
+configure(void)
+{
+	uint16_t v;
+
+	if (!reg_write(0x0f, 0x5a6b) || !reg_read(0xfb, &v) || !reg_write(0xa0, (uint16_t)(v ^ 0x005a))) {
+		return false;
+	}
+	/* key 2 (tfa98xx_key2(unlock)) */
+	if (!reg_write(0x0f, 0x5a6b) || !reg_write(0xa1, 0x005a) || !reg_write(0x0f, 0)) {
+		return false;
+	}
+	for (unsigned i = 0; i < sizeof(rev_0c74) / sizeof(rev_0c74[0]); i++) {
+		if (!reg_write(rev_0c74[i].reg, rev_0c74[i].value)) {
+			return false;
+		}
+	}
+	/* the container's three registers */
+	if (!reg_write(0x0f, 0x5a6b) || !reg_write(0xa1, 0x005a) || !reg_write(0xa0, 0x005a)) {
+		return false;
+	}
+	for (unsigned i = 0; i < sizeof(cnt_fields) / sizeof(cnt_fields[0]); i++) {
+		if (!bf_set(cnt_fields[i].bf, cnt_fields[i].value)) {
+			return false;
+		}
+	}
+	for (unsigned i = 0; i < sizeof(profile_fields) / sizeof(profile_fields[0]); i++) {
+		if (!bf_set(profile_fields[i].bf, profile_fields[i].value)) {
+			return false;
+		}
+	}
+	/* 16-bit slots (Android's driver: TDMNBCK 0, TDMSLLN 15, TDMSSIZE 15 for 16 bits) */
+	return bf_set(BF_TDMNBCK, 0) && bf_set(BF_TDMSLLN, 15) && bf_set(BF_TDMSSIZE, 15);
+}
+
+static bool hw_up;
+
+/* the engine, pins and the chip out of reset; false if it does not answer */
+static bool
+hw_start(void)
 {
 	const char *problem;
-	uint16_t id = 0;
+	uint16_t id;
 
+	if (hw_up) {
+		return true;
+	}
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
 	se = ml_io_map(SE_PHYS, SE_SIZE);
-	say("tfa: level %u: the TFA9874 on wrapper 0's engine 1\n", level);
 	if (!clocks_on()) {
 		say("tfa: the serial engine's clocks do not start\n");
-		goto out;
+		return false;
 	}
-	/* the pins: reset low (the chip runs; Android's active state), the serial engine's two to function 1, 2 mA, no pull */
+	/* reset: high, then low (the driver's tfa98xx_ext_reset: the chip runs with the pin low) */
+	pin_config(PIN_RESET, 0, 0, 0, true, 1);
+	sleep_ms(5);
 	pin_config(PIN_RESET, 0, 0, 0, true, 0);
 	pin_config(PIN_SDA, 1, 0, 0, false, 0);
 	pin_config(PIN_SCL, 1, 0, 0, false, 0);
 	sleep_ms(10);
 	if ((problem = geni_i2c_init()) != NULL) {
 		say("tfa: %s\n", problem);
-		goto out;
+		return false;
 	}
 	if (!reg_read(0x03, &id)) {
 		say("tfa: the chip does not answer at address %#x\n", I2C_ADDR);
-		goto out;
+		return false;
 	}
 	say("tfa: THE CHIP ANSWERS: register 0x03 (the identity) reads %#06x\n", id);
+	if (id != REV_V1_14) {
+		say("tfa: not the revision this knows (%#x): left alone\n", REV_V1_14);
+		return false;
+	}
+	hw_up = true;
+	return true;
+}
+
+bool
+hakios_tfa_model(void)
+{
+	static int is = -1;
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (is < 0) {
+		is = SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+		    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess && strcmp((const char *)prop, "raphael") == 0;
+	}
+	return is == 1;
+}
+
+/* found, reset, configured: powered down */
+bool
+hakios_tfa_prepare(void)
+{
+	uint16_t status;
+
+	broken = false;
+	if (!hw_start()) {
+		return false;
+	}
+	say("tfa: the amplifier is configured as Android's driver configures it (cold start)\n");
+	if (!configure()) {
+		give_up("the configuration does not go in");
+		return false;
+	}
+	(void)reg_read(REG_STATUS, &status);
+	prepared = true;
+	say("tfa: THE AMPLIFIER IS CONFIGURED: powered down\n");
+	return true;
+}
+
+/* only while the I2S clock runs: the chip locks to it */
+bool
+hakios_tfa_start(void)
+{
+	uint16_t status = 0, state = 0;
+	unsigned tries;
+
+	if (broken || !prepared) {
+		return false;
+	}
+	say("tfa: power-down off, once the clock is there\n");
+	if (!bf_set(BF_MANSCONF, 1) || !bf_set(BF_PWDN, 0)) {
+		give_up("power-down does not clear");
+		return false;
+	}
+	for (tries = 0; tries < 100; tries++) {
+		if (reg_read(REG_STATUS2, &status) && (status & STATUS2_CLKS)) {
+			break;
+		}
+		sleep_ms(2);
+	}
+	if (!(status & STATUS2_CLKS)) {
+		say("tfa: THE CLOCK IS NOT STABLE after %u tries (status %#06x): powered down again\n", tries, status);
+		(void)bf_set(BF_PWDN, 1);
+		give_up("the chip does not see the clock");
+		return false;
+	}
+	(void)reg_read(REG_STATE, &state);
+	say("tfa: clocks stable after %u tries: status %#06x (PLL %s), state %#x\n", tries, status,
+	    (status & STATUS2_PLLS) ? "locked" : "NOT locked", state & 15);
+	(void)reg_read(REG_STATUS, &status);    /* (the alarms are sticky and clear on read: the power-up's go here) */
+	if (!bf_set(BF_AMPE, 1)) {
+		give_up("the amplifier does not enable");
+		return false;
+	}
+	started = true;
+	say("tfa: THE AMPLIFIER IS ON\n");
+	return true;
+}
+
+/*
+ * The level: `below' eighths of a dB under Android's. The total gain field (TDMSPKG, 0 to 15; Android's profile has 4)
+ * is lowered for anything under Android's level, to zero from 20 dB under -- provisional, until the step is measured:
+ * the first tests are quiet by construction.
+ */
+bool
+hakios_tfa_volume(uint32_t below, __unused uint32_t step_ms)
+{
+	uint16_t gain = below >= 160 ? 0 : below >= 96 ? 1 : below >= 48 ? 2 : below >= 16 ? 3 : 4;
+
+	if (broken || !started) {
+		return false;
+	}
+	say("tfa: level %u.%03u dB under Android's: total gain field %u (Android's 4)\n", below / 8, below % 8 * 125, gain);
+	return bf_set(BF_INPLEV, below >= 160 ? 1 : 0) && bf_set(BF_TDMSPKG, gain);
+}
+
+bool
+hakios_tfa_healthy(void)
+{
+	uint16_t status;
+
+	if (broken) {
+		return false;
+	}
+	if (!reg_read(REG_STATUS, &status)) {
+		give_up("the status cannot be read");
+		return false;
+	}
+	if (status & (STATUS_OTDS | STATUS_OCDS | STATUS_UVDS | STATUS_NOCLK)) {
+		say("tfa: ALARM, status %#06x (bit 2 over-temperature, 3 over-current, 4 under-voltage, 7 lost clock)\n", status);
+		(void)bf_set(BF_AMPE, 0);
+		give_up("an alarm");
+		return false;
+	}
+	return true;
+}
+
+void
+hakios_tfa_stop(void)
+{
+	if (!hw_up || !started) {
+		return;
+	}
+	(void)bf_set(BF_AMPE, 0);
+	(void)bf_set(BF_PWDN, 1);
+	started = false;
+	say("tfa: the amplifier is off and powered down\n");
+}
+
+void
+hakios_tfa_quiesce(void)
+{
+	if (hw_up && started) {
+		uint8_t off[3] = { 0x00, 0x00, 0x01 };
+
+		/* (the register's own value: powered down, amplifier off, DC-to-DC off) */
+		(void)geni_i2c_xfer(off, NULL, 3, false);
+		started = false;
+	}
+}
+
+static uint32_t level;
+
+static void
+tfa_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	say("tfa: level %u: the TFA9874 on wrapper 0's engine 1\n", level);
+	if (!hw_start()) {
+		goto out;
+	}
 	show_registers("regs", 0x00, 0x1f);
 	show_registers("regs", 0x20, 0x2f);
-	show_registers("regs", 0xee, 0xf8);
+	if (level >= 2) {
+		/* (the registers as they are after the configuration, and with the clock absent: the chip cannot start) */
+		if (hakios_tfa_prepare()) {
+			show_registers("regs", 0x00, 0x1f);
+			show_registers("regs", 0x20, 0x2f);
+			show_registers("regs", 0x60, 0x6f);
+		}
+	}
 out:
 	say("tfa: done\n");
 	thread_terminate(current_thread());

@@ -51,6 +51,13 @@ void hakios_audio_set_sink(const char *name, hakios_audio_sink_t sink);
 bool hakios_audio_volume(uint32_t *below, bool *muted, uint32_t *generation);
 void hakios_audio_init(void);
 void hakios_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
+bool hakios_tfa_model(void);            /* this phone's amplifier is the TFA9874 (hakios.speaker_tfa.c); the calls below are the speaker interface's */
+bool hakios_tfa_prepare(void);
+bool hakios_tfa_start(void);
+bool hakios_tfa_volume(uint32_t below, uint32_t step_ms);
+bool hakios_tfa_healthy(void);
+void hakios_tfa_stop(void);
+void hakios_tfa_quiesce(void);
 void hakios_tfa_init(void);             /* boot-arg tfa=N: the Redmi K20 Pro's speaker amplifier, an NXP TFA9874 (bsd/dev/hakios.speaker_tfa.c) */
 void hakios_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
 void hakios_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (drivers/haptic/hakios.haptic.c) */
