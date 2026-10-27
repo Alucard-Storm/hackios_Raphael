@@ -9,7 +9,7 @@ K=${KERNEL:-hakios-kernel}
 MU=Mu-Silicium
 DEVICE=${DEVICE:-redwood}
 CODENAME=redwood
-[ -f devices/$DEVICE/uefi.conf ] && CODENAME=$(sed -n 's/^CODENAME=//p' devices/$DEVICE/uefi.conf)
+[ -f devices/$DEVICE/run.conf ] && CODENAME=$(sed -n 's/^CODENAME=//p' devices/$DEVICE/run.conf)
 mkdir -p prebuilt/userland devices/$DEVICE/prebuilt
 cp $K prebuilt/hakios-kernel
 # The loader in prebuilt/ is built with the PLACEHOLDER identity (xnuloader/mkidentity.sh --placeholder: no Apple data), in a

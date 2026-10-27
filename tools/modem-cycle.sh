@@ -4,10 +4,13 @@
 # (or fastboot) for the next run (XL_END=android: back to Android).
 # The phone is never flashed: the kernel is booted with "fastboot boot"-like upload through xl.
 cd "$(dirname "$0")/.." || exit 1
-PATH=$PWD/tools/macos-bin/platform-tools:$PWD/tools/macos-bin:$PATH
+# the macOS shims (gstat, gtimeout, ...) are for the Mac only; on Linux they would shadow the real tools
+[ "$(uname)" = Darwin ] && PATH=$PWD/tools/macos-bin/platform-tools:$PWD/tools/macos-bin:$PATH
 ARGS=$1; SECS=${2:-300}
 # BASE_ARGS: the arguments the runner puts first (default: the reference phone's cores, clock and storage).
 # Empty, as `make phone` sets it when there is a .config, they come from the configuration instead and are not doubled.
+# the device's own (devices/$DEVICE/run.conf, BASE_ARGS) unless the caller set it
+[ -z "${BASE_ARGS+x}" ] && [ -n "${DEVICE:-}" ] && B=$(sed -n 's/^BASE_ARGS=//p' devices/$DEVICE/run.conf 2>/dev/null) && [ -n "$B" ] && BASE_ARGS=$B
 # A port's SoC addresses (devices/<name>/soc.args, made by devices/<name>/pull-soc.sh): added to the
 # kernel command line so hakios.mpss.c / hakios.ipa.c map that phone's blocks. SOC_ARGS names the file;
 # default is the one device there is. The POCO's values equal the kernel defaults, so this is a no-op there.

@@ -9,7 +9,7 @@ The boot shim copies the FD to its base and the payload to PAYLOAD_BASE.
 
 The UEFI pieces are taken from a Mu-Silicium tree built here (Mu-Silicium/, see uefi/README.md)
 or, when there is none, from devices/<device>/prebuilt/. The device is $DEVICE (default redwood) or -d; a
-devices/<device>/uefi.conf (CODENAME=, FD_BASE=, FD_SIZE=, PAYLOAD_BASE=) names the Mu-Silicium codename and the memory
+devices/<device>/run.conf (CODENAME=, FD_BASE=, FD_SIZE=, PAYLOAD_BASE=) names the Mu-Silicium codename and the memory
 map when they differ from redwood's.
 
 usage: mkxnuimg.py [-d device] [-p payload.bin] [-o out.img]
@@ -30,7 +30,7 @@ args = ap.parse_args()
 dev_dir = os.path.join(HERE, 'devices', args.device)
 conf = {'CODENAME': 'redwood', 'FD_BASE': '0x9FD00000', 'FD_SIZE': '0x200000', 'PAYLOAD_BASE': '0xF0000000'}
 try:
-    for line in open(os.path.join(dev_dir, 'uefi.conf')):
+    for line in open(os.path.join(dev_dir, 'run.conf')):
         line = line.split('#', 1)[0].strip()
         if '=' in line:
             k, v = line.split('=', 1)

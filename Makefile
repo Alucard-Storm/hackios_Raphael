@@ -39,7 +39,9 @@
 DEVICE ?= redwood
 export DEVICE
 JOBS ?= 8
-SECS ?= 600
+# a device's own: devices/$(DEVICE)/run.conf (KEY=VALUE lines: PHONE_ARGS, PHONE_SECS, BASE_ARGS, and the UEFI's addresses)
+conf = $(shell sed -n 's/^$(1)=//p' devices/$(DEVICE)/run.conf 2>/dev/null)
+SECS ?= $(or $(call conf,PHONE_SECS),600)
 # qemu-open runs the open configuration: configs/defconfig (nothing of a phone's own, one core)
 ARGS_OPEN ?= $(shell tools/hakios-config.py args --defconfig defconfig)
 ifneq ($(wildcard .config),)
@@ -47,7 +49,7 @@ ifneq ($(wildcard .config),)
 ARGS ?= $(shell tools/hakios-config.py args)
 RUNNER_BASE = BASE_ARGS=
 else
-ARGS ?= touchscreen=1 gpu=1 adsp=1 sound=4 wifi=1 haptic=5 modem=1 modem_again=1 modem_buffer=0xa8000000
+ARGS ?= $(or $(call conf,PHONE_ARGS),touchscreen=1 gpu=1 adsp=1 sound=4 wifi=1 haptic=5 modem=1 modem_again=1 modem_buffer=0xa8000000)
 RUNNER_BASE =
 endif
 IMAGE_OPTS ?= REST=1
