@@ -365,10 +365,13 @@ show_registers(const char *what, unsigned from, unsigned to)
 #define BF_TDMSPKG      0x6163
 
 #define REG_STATUS      0x10            /* sticky alarms: clear on read */
-#define STATUS_OTDS     (1u << 2)
+/* (bits 0, 1, 2 and 4 -- POR, DC-to-DC over-current OK, "OTP alarm", "UVP alarm" -- read 0x0016 on this chip at idle and
+ * while Android plays: they are not faults. The faults: over-current of the amplifier, the alarm state, a lost clock.) */
 #define STATUS_OCDS     (1u << 3)
-#define STATUS_UVDS     (1u << 4)
+#define STATUS_MANALARM (1u << 5)
 #define STATUS_NOCLK    (1u << 7)
+#define REG_TEMP        0x16            /* [8:0] the chip's temperature, degrees C */
+#define HOTTEST_C       85
 #define REG_STATUS2     0x11            /* [7] clocks stable, [6] PLL lock, [12] MTP busy, [15] references */
 #define STATUS2_CLKS    (1u << 7)
 #define STATUS2_PLLS    (1u << 6)
@@ -604,7 +607,8 @@ hakios_tfa_start(void)
 		return false;
 	}
 	started = true;
-	say("tfa: THE AMPLIFIER IS ON\n");
+	(void)reg_read(REG_TEMP, &state);
+	say("tfa: THE AMPLIFIER IS ON (the chip is at %u C)\n", state & 0x1ff);
 	return true;
 }
 
@@ -628,7 +632,7 @@ hakios_tfa_volume(uint32_t below, __unused uint32_t step_ms)
 bool
 hakios_tfa_healthy(void)
 {
-	uint16_t status;
+	uint16_t status, temp;
 
 	if (broken) {
 		return false;
@@ -637,10 +641,16 @@ hakios_tfa_healthy(void)
 		give_up("the status cannot be read");
 		return false;
 	}
-	if (status & (STATUS_OTDS | STATUS_OCDS | STATUS_UVDS | STATUS_NOCLK)) {
-		say("tfa: ALARM, status %#06x (bit 2 over-temperature, 3 over-current, 4 under-voltage, 7 lost clock)\n", status);
+	if (status & (STATUS_OCDS | STATUS_MANALARM | STATUS_NOCLK)) {
+		say("tfa: ALARM, status %#06x (bit 3 over-current, 5 alarm state, 7 lost clock)\n", status);
 		(void)bf_set(BF_AMPE, 0);
 		give_up("an alarm");
+		return false;
+	}
+	if (reg_read(REG_TEMP, &temp) && (temp & 0x1ff) > HOTTEST_C) {
+		say("tfa: THE CHIP IS AT %u C (limit %u)\n", temp & 0x1ff, HOTTEST_C);
+		(void)bf_set(BF_AMPE, 0);
+		give_up("too hot");
 		return false;
 	}
 	return true;
