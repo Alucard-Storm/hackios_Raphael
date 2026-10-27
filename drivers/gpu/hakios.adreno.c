@@ -507,7 +507,11 @@ step_fuses(void)
 	speed_bin = bin;
 	gaming = get8(&qfprom, "gaming bin", QFPROM_CORRECTED + QFPROM_GPU_GAMING_BIN) >> 5 & 1;
 	if (gpu_model != &gpu_models[0]) {
-		printf("adreno: %u: the fuses' cells are not known for this phone (the bytes above are the POCO's offsets)\n", step);
+		/* dt: qcom,gpu-speed-bin = <0x4130 0xe0000000 29>: a word of the fuses, its top three bits */
+		uint32_t cell = get(&qfprom, "gpu speed bin cell", 0x4130);
+
+		speed_bin = cell >> 29 & 7;
+		printf("adreno: %u: this phone's speed bin: %u (cell %#x)\n", step, speed_bin, cell);
 	} else {
 	/* dt: qcom,gpu-models: 0xac and 0xbe are sold as Adreno 643, anything else is the 642L */
 		printf("adreno: %u: speed bin %u: an Adreno %s; gaming bin %u\n", step, bin, bin == 0xac || bin == 0xbe ? "643" : "642L",
@@ -3507,7 +3511,7 @@ hakios_adreno_quiesce(void)
  * far it has got (a "fence": a submission's number, written by the core when it is through
  * with it). The caller holds one lock around all of these.
  */
-#define GPU_CHIP_ID             0x06030500ull   /* dt: qcom,chipid */
+#define GPU_CHIP_ID             (gpu_model == &gpu_models[1] ? 0x06040001ull : 0x06030500ull)   /* dt: qcom,chipid */
 #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
 #define GPU_ADDRESSES_SIZE      0xe0000000ull
 #define GPU_FENCE_AT            0x40            /* in the scratch page */
@@ -3604,8 +3608,8 @@ hakios_gpu_parameter(uint32_t which, uint64_t *value)
 	case 0x11:                              /* RAYTRACING */
 		*value = 0;
 		return true;
-	case 0x02:                              /* GMEM_SIZE */
-		*value = 512 * 1024;
+	case 0x02:                              /* GMEM_SIZE: the 640's is 1 MB (the vendor's gpulist: "verified 1MB") */
+		*value = gpu_model == &gpu_models[1] ? 1024 * 1024 : 512 * 1024;
 		return true;
 	case 0x03:                              /* CHIP_ID, with the speed bin above it */
 		*value = GPU_CHIP_ID | (uint64_t)speed_bin << 32;
@@ -3619,14 +3623,14 @@ hakios_gpu_parameter(uint32_t which, uint64_t *value)
 	case 0x07:                              /* PRIORITIES */
 		*value = 1;
 		return true;
-	case 0x10:                              /* HIGHEST_BANK_BIT */
-		*value = 14;
+	case 0x10:                              /* HIGHEST_BANK_BIT (dt: qcom,highest-bank-bit: 15 on the Redmi K20 Pro) */
+		*value = gpu_model == &gpu_models[1] ? 15 : 14;
 		return true;
 	case 0x12:                              /* UBWC_SWIZZLE */
 		*value = 6;
 		return true;
-	case 0x13:                              /* MACROTILE_MODE */
-		*value = 1;
+	case 0x13:                              /* MACROTILE_MODE (the 640's is the default: not set, as Linux's msm driver for it) */
+		*value = gpu_model == &gpu_models[1] ? 0 : 1;
 		return true;
 	default:                                /* among them VA_START, VA_SIZE: addresses are ours to give */
 		return false;
