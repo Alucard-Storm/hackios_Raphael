@@ -1576,18 +1576,18 @@ static struct block smem_lock = { "shared memory's lock", 0x01f43000, 0x1000 };
 
 /* Our item made in the partition, as Linux's qcom_smem_alloc_private() makes one (hakios.wifi.c: our_item_make()). */
 static bool
-our_item_make(uint32_t partition)
+our_item_make(uint32_t partition, uint32_t item, uint32_t item_size, uint32_t padding)
 {
 	struct smem_partition header;
 	struct smem_entry entry;
-	const uint32_t item_size = (sizeof(struct smp2p) + 7) & ~7u, need_bytes = sizeof(entry) + item_size;
+	const uint32_t need_bytes = sizeof(entry) + item_size;
 	uint32_t owner = ~0u, at;
 	bool made = false;
 
 	lck_mtx_lock(&hakios_smem_alloc_lock);         /* (the Wi-Fi's start allocates under the same hardware lock) */
 	need(&smem_lock);
 	printf("adsp: %u: about to take the lock (%#x), write an entry for item %u with %u bytes behind it at the partition's mark, "
-	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, ITEM_SMP2P_OURS, item_size, need_bytes);
+	    "move the mark by %u, and release the lock\n", step, smem_lock.phys + LOCK_OWNER, item, item_size, need_bytes);
 	snprintf(last_write, sizeof(last_write), "step %u took the shared memory's lock", step);
 	for (uint32_t ms = 0; ms <= 1000; ms++) {
 		wr(smem_lock.base + LOCK_OWNER, LOCK_US);
@@ -1608,7 +1608,7 @@ our_item_make(uint32_t partition)
 		goto out;
 	}
 	for (at = sizeof(header); at < header.free_uncached;) {
-		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == ITEM_SMP2P_OURS ||
+		if (!smem_peek(partition + at, &entry, sizeof(entry)) || entry.canary != SMEM_CANARY || entry.item == item ||
 		    entry.size > header.size) {
 			break;
 		}
@@ -1623,9 +1623,9 @@ our_item_make(uint32_t partition)
 		printf("adsp: %u: no room: %u bytes wanted, %u free: nothing is written\n", step, need_bytes, header.free_cached - at);
 		goto out;
 	}
-	smem_poke(partition + at, SMEM_CANARY | ITEM_SMP2P_OURS << 16);
+	smem_poke(partition + at, SMEM_CANARY | item << 16);
 	smem_poke(partition + at + 4, item_size);
-	smem_poke(partition + at + 8, item_size - (uint32_t)sizeof(struct smp2p));
+	smem_poke(partition + at + 8, padding);
 	smem_poke(partition + at + 12, 0);
 	settle();
 	smem_poke(partition + __offsetof(struct smem_partition, free_uncached), at + need_bytes);
@@ -1658,7 +1658,8 @@ step_our_item(void)
 		printf("adsp: %u: item %u is there, at %#lx: a kernel before this one made it, and it is used again\n", step,
 		    ITEM_SMP2P_OURS, SMEM_PHYS + our_item);
 	} else {
-		if (!our_item_make(partition)) {
+		if (!our_item_make(partition, ITEM_SMP2P_OURS, (sizeof(struct smp2p) + 7) & ~7u,
+		    ((sizeof(struct smp2p) + 7) & ~7u) - (uint32_t)sizeof(struct smp2p))) {
 			return false;
 		}
 		our_item = our_item_find();
@@ -3055,6 +3056,24 @@ step_queues(void)
 	uint32_t head, tail;
 
 	announce("find GLINK's descriptor and the two queues, and read what the audio DSP has put into its own");
+	/*
+	 * The SM8150's DSP makes the descriptor and its own queue, and leaves ours to us (Linux's glink_smem.c allocates the
+	 * transmit queue, 16 KB, as the DSP's is): made here when it is the only thing missing.
+	 */
+	{
+		uint32_t size = 0, their_size = 0, cacheline = 0, partition_size = 0;
+
+		if (smem_item(ITEM_GLINK_DESCRIPTOR, &size) != 0 && size == 32 && smem_item(ITEM_GLINK_OUR_QUEUE, &size) == 0 &&
+		    smem_item(ITEM_GLINK_THEIR_QUEUE, &their_size) != 0 && their_size >= 1024 && !(their_size & 7)) {
+			uint32_t partition = smem_partition(SMEM_US, SMEM_ADSP, &cacheline, &partition_size);
+
+			printf("adsp: %u: our queue (item %u) is not there: made, %u bytes like the DSP's\n", step, ITEM_GLINK_OUR_QUEUE,
+			    their_size);
+			if (partition == 0 || !our_item_make(partition, ITEM_GLINK_OUR_QUEUE, their_size, 0)) {
+				return false;
+			}
+		}
+	}
 	if (!glink_find()) {
 		printf("adsp: %u: GLINK's items are not all there, or not of a shape this knows (descriptor %#x, ours %#x of %u bytes, "
 		    "the DSP's %#x of %u)\n", step, glink.descriptor, glink.ours, glink.ours_size, glink.theirs, glink.theirs_size);
