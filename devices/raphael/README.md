@@ -256,4 +256,4 @@ the GMU firmware's power-up sequence.
 arbiter is the same (version 5, same addresses). Power and volume down are KPDPWR_N (bit 0) and RESIN_N (bit 1) of the
 PM8150's power-on block (slave 0, 0x800, type 1 subtype 4, "qcom,qpnp-power-on"); volume up is GPIO6 of the PM8150
 (0xc500, input with pull-up, left by the firmware). Read-only, as on the POCO. Checked by hand: every press and release
-was logged with a sensible hold time. Whether iOS reacts to them (lock, volume HUD) is not looked at yet.
+was logged with a sensible hold time. Confirmed by hand in iOS: the buttons work.
