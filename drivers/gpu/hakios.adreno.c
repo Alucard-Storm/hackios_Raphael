@@ -96,6 +96,9 @@
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
+
+#include <kern/locks.h>
+extern lck_mtx_t hakios_scm_lock;
 #include <pexpert/device_tree.h>
 #include <sys/hakios.input.h>
 #include <sys/stat.h>
@@ -1672,6 +1675,7 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 	    second, third);
 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
 	hold(true);
+	lck_mtx_lock(&hakios_scm_lock);
 	for (int i = 0; i < 100; i++) {
 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
 		register uint64_t x1 __asm__("x1") = arguments;
@@ -1688,10 +1692,12 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		if (x0 != SCM_INTERRUPTED) {
 			printf("adreno: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
 			*answer = x1;
+			lck_mtx_unlock(&hakios_scm_lock);
 			return (int32_t)x0;
 		}
 	}
 	printf("adreno: %u: TrustZone keeps saying the call was interrupted\n", step);
+	lck_mtx_unlock(&hakios_scm_lock);
 	return -1;
 }
 
@@ -3081,11 +3087,40 @@ step_core_start(void)
 	 * a6xx_calc_ubwc_config, a6xx_set_ubwc_config for this GPU: highest bank bit 14, and the
 	 * rest as below); Mesa is told the same (hakios_gpu_parameter()).
 	 */
-	put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 1u << 11 | 1u << 4 | 1u << 1);
-	put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 1u << 1);
-	put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 4 | 1u << 1);
-	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
-	put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 1);
+	uint32_t tiling = 3;                    /* adreno_tiling: bit 0 the mode registers as the vendor sets them, bit 1 the UCHE's graphics memory range */
+
+	PE_parse_boot_argn("adreno_tiling", &tiling, sizeof(tiling));
+	if (gpu_model->legacy_gmu) {
+		/*
+		 * The vendor's a6xx_start() for the Adreno 640 from this phone's device tree: highest bank bit 15 (bits 14:13 of
+		 * the register fields: 15 - 13 = 2), UBWC mode 3 (mode 0 with the "amsbc" bit), minimum access length 32, no
+		 * macrotiling channels (RBBM_NC_MODE_CNTL left at its reset value); and the range of the graphics memory in the
+		 * UCHE: from 1 MB (the memory's size, aligned to 1 MB) for its 1 MB. With the POCO's values here tiled rendering
+		 * (the GMEM path) drew wrong: rounded corners as octagons, black boxes behind text.
+		 */
+		if (tiling & 1) {
+			put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 1u << 4 | 2u << 1);
+			put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 2u << 1);
+			put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 1);
+			put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 2u << 21);
+		} else {
+			put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 1u << 11 | 1u << 4 | 1u << 1);
+			put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 1u << 1);
+			put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 4 | 1u << 1);
+			put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
+			put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 1);
+		}
+		if (tiling & 2) {
+			put64(&gpu, "uche_gmem_range_min", GPU_WORD(0x0e0b), 0x100000);
+			put64(&gpu, "uche_gmem_range_max", GPU_WORD(0x0e0d), 0x100000 + 1024 * 1024 - 1);
+		}
+	} else {
+		put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 1u << 11 | 1u << 4 | 1u << 1);
+		put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 1u << 1);
+		put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 4 | 1u << 1);
+		put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
+		put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 1);
+	}
 	put(&gpu, "rbbm_perfctr_cntl", RBBM_PERFCTR_CNTL, 1);
 	put(&gpu, "rbbm_interface_hang_int_cntl", RBBM_INTERFACE_HANG_INT_CNTL, 1u << 30 | 0x1fffff);
 	put(&gpu, "uche_client_pf", UCHE_CLIENT_PF, 1u << 7 | 1);
@@ -4149,7 +4184,13 @@ hakios_adreno_init(void)
 		}
 		by_itself = true;
 		last_step = 21;
-		skip_steps = 1u << 10 | 1u << 11 | 1u << 12;
+		/*
+		 * (the POCO leaves out the steps that only check the GMU's memory, TrustZone and the zap shader's signature. On the
+		 * Redmi K20 Pro they are kept: a phone just started from Android has the zap shader loaded there, and step 19's
+		 * first call, to give it up, hangs the phone unless steps 11 and 12 have been made first: every run started from a
+		 * fresh boot hung there, and those started from the loader, after a clean run, did not.)
+		 */
+		skip_steps = gpu_model->legacy_gmu ? 0 : 1u << 10 | 1u << 11 | 1u << 12;
 		pause_ms = 0;
 		watch_seconds = 0;
 		keep = 1;

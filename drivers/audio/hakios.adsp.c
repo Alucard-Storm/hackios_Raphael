@@ -110,6 +110,7 @@ extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 /* What the Wi-Fi's DSP and this one both use (hakios.wifi.c). */
 extern lck_mtx_t hakios_aop_mailbox_lock;
 extern lck_mtx_t hakios_smem_alloc_lock;
+extern lck_mtx_t hakios_scm_lock;
 extern lck_mtx_t hakios_rsc_lock;            /* RPMh's sequencer, shared with the other DSP's driver */
 
 static LCK_GRP_DECLARE(adsp_lock_group, "hakios-adsp");
@@ -1291,6 +1292,7 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 	printf("adsp: %u: about to ask TrustZone %s: smc %#llx, arguments %#llx, %#llx, %#llx\n", step, what, function, first,
 	    second, third);
 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
+	lck_mtx_lock(&hakios_scm_lock);
 	for (int i = 0; i < 100; i++) {
 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
 		register uint64_t x1 __asm__("x1") = arguments;
@@ -1307,10 +1309,12 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		if (x0 != SCM_INTERRUPTED) {
 			printf("adsp: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
 			*answer = x1;
+			lck_mtx_unlock(&hakios_scm_lock);
 			return (int32_t)x0;
 		}
 	}
 	printf("adsp: %u: TrustZone keeps saying the call was interrupted\n", step);
+	lck_mtx_unlock(&hakios_scm_lock);
 	return -1;
 }
 

@@ -186,7 +186,7 @@ static LCK_GRP_DECLARE(wifi_lock_group, "hakios-wifi");
  * them: the always-on processor's mailbox, the shared memory's allocation, RPMh's sequencer and the SMMU's free match
  * registers. They are drivers/core/hakios.platform.c's, so that each of those drivers can be built without this one.
  */
-extern lck_mtx_t hakios_aop_mailbox_lock, hakios_smem_alloc_lock, hakios_rsc_lock, hakios_smmu_lock;
+extern lck_mtx_t hakios_aop_mailbox_lock, hakios_smem_alloc_lock, hakios_rsc_lock, hakios_smmu_lock, hakios_scm_lock;
 
 static uint32_t last_step, pause_ms = 2200, fine, watch_seconds = 3;
 static uint32_t step;                   /* the one being performed */
@@ -1746,6 +1746,7 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 	    second, third);
 	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
 	hold(true);
+	lck_mtx_lock(&hakios_scm_lock);
 	for (int i = 0; i < 100; i++) {
 		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
 		register uint64_t x1 __asm__("x1") = arguments;
@@ -1762,10 +1763,12 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		if (x0 != SCM_INTERRUPTED) {
 			printf("wifi: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
 			*answer = x1;
+			lck_mtx_unlock(&hakios_scm_lock);
 			return (int32_t)x0;
 		}
 	}
 	printf("wifi: %u: TrustZone keeps saying the call was interrupted\n", step);
+	lck_mtx_unlock(&hakios_scm_lock);
 	return -1;
 }
 

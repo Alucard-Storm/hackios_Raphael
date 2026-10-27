@@ -51,6 +51,8 @@ hakios_spmi_unlock(void)
  */
 LCK_MTX_DECLARE(hakios_aop_mailbox_lock, &hakios_platform_lock_group);
 LCK_MTX_DECLARE(hakios_smem_alloc_lock, &hakios_platform_lock_group);
+/* one TrustZone call at a time, whoever makes it (the GPU, the audio DSP, the Wi-Fi DSP, the modem): two at once have hung the phone */
+LCK_MTX_DECLARE(hakios_scm_lock, &hakios_platform_lock_group);
 LCK_MTX_DECLARE(hakios_rsc_lock, &hakios_platform_lock_group);
 LCK_MTX_DECLARE(hakios_smmu_lock, &hakios_platform_lock_group);
 
