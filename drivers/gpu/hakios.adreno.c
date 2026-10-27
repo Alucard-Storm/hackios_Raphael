@@ -391,6 +391,42 @@ rpmh_resource(const char *name, uint16_t *levels, unsigned *level_count)
 	return 0;
 }
 
+/* Every resource of the command database whose address is in 0x30000 to 0x300ff (the supply rails by level): name, address. */
+static void
+dump_rails(void)
+{
+	const struct cmd_db_header *db = cmd_db;
+	char line[200];
+	int n = 0;
+
+	if (db == NULL || db->magic[0] != 0xdb) {
+		return;
+	}
+	for (unsigned s = 0; s < 8; s++) {
+		const struct cmd_db_slave *slave = &db->slave[s];
+		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
+
+		if (slave->id == 0 || slave->count > 512) {
+			continue;
+		}
+		for (unsigned i = 0; i < slave->count; i++) {
+			if (entry[i].address >= 0x30000 && entry[i].address < 0x30100) {
+				char name[9] = { 0 };
+
+				memcpy(name, entry[i].id, 8);
+				n += snprintf(line + n, sizeof(line) - n, " %s=%#x", name, entry[i].address);
+				if (n > 150) {
+					printf("adreno: %u: rails:%s\n", step, line);
+					n = 0;
+				}
+			}
+		}
+	}
+	if (n) {
+		printf("adreno: %u: rails:%s\n", step, line);
+	}
+}
+
 static void
 show_rpmh_resource(const char *name)
 {
@@ -409,6 +445,9 @@ show_rpmh_resource(const char *name)
 		at += snprintf(levels + at, sizeof(levels) - (size_t)at, " %u", level[l]);
 	}
 	printf("adreno: %u: RPMh has \"%s\" at %#x; levels:%s\n", step, name, address, levels);
+	if (strcmp(name, "gfx.lvl") == 0) {
+		dump_rails();
+	}
 }
 
 static bool
@@ -679,6 +718,17 @@ static bool measure_clocks(void);
  * Both come from the 300 MHz tap of the global 600 MHz PLL, which runs anyway: no PLL of the
  * GPU's own has to be started.
  */
+static uint64_t
+watch_us(void)
+{
+	uint64_t ns;
+
+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+	return ns / NSEC_PER_USEC;
+}
+
+static bool pll1_configure(void);
+
 static bool
 step_clocks(void)
 {
@@ -718,12 +768,49 @@ step_clocks(void)
 	    !clock_on(&gpucc, "smmu vote", GPUCC_SMMU_VOTE_CBCR, false)) {
 		return false;
 	}
+	if (gpu_model->legacy_gmu && !pll1_configure()) {
+		return false;
+	}
 	if (gpu_model != &gpu_models[0]) {
 		/* the counter's debug-mux numbers are the POCO's (debugcc-yupik.c): not measured on this phone yet */
 		printf("adreno: %u: the clocks' rates are not measured on this phone\n", step);
 		return true;
 	}
 	return measure_clocks();
+}
+
+/*
+ * The SM8150's PLL1 (a Trion PLL at +0x100 of the GPU clock controller) as Android's clock driver leaves it at boot
+ * (gpucc-sm8150.c gpu_cc_pll1_config, clk_trion_pll_configure()): 500 MHz (L 26, alpha 0xaaa of 2^16 x 19.2 MHz), the
+ * control words, then standby with reset released. The GMU's firmware switches it on and off, but its numbers are the
+ * host's to set, and nothing here had set them: they read zero.
+ */
+static bool
+pll1_configure(void)
+{
+	const uint32_t base = GPUCC_PLL1_MODE;
+	uint32_t mode;
+
+	announce("in the GPU's clock controller: PLL1's frequency and control words as Android's clock driver sets them");
+	put(&gpucc, "pll1 L", base + 0x04, 0x1a);
+	put(&gpucc, "pll1 calibration L", base + 0x08, 0x44);
+	put(&gpucc, "pll1 alpha", base + 0x40, 0xaaa);
+	put(&gpucc, "pll1 config ctl", base + 0x18, 0x20485699);
+	put(&gpucc, "pll1 config ctl hi", base + 0x1c, 0x00002267);
+	put(&gpucc, "pll1 config ctl hi1", base + 0x20, 0x00000024);
+	put(&gpucc, "pll1 user ctl hi", base + 0x10, 0x00000805);
+	put(&gpucc, "pll1 user ctl hi1", base + 0x14, 0x000000d0);
+	put(&gpucc, "pll1 test ctl hi", base + 0x28, 0x00000002);
+	mode = get(&gpucc, "pll1 mode", base);
+	put(&gpucc, "pll1 mode: hardware update logic bypass", base, mode | (1u << 23));
+	mode = get(&gpucc, "pll1 mode", base);
+	put(&gpucc, "pll1 mode: output off", base, mode & ~1u);
+	put(&gpucc, "pll1 opmode: standby", base + 0x38, 0);
+	mode = get(&gpucc, "pll1 mode", base);
+	put(&gpucc, "pll1 mode: reset released", base, mode | (1u << 2));
+	get(&gpucc, "pll1 mode", base);
+	get(&gpucc, "pll1 L", base + 0x04);
+	return true;
 }
 
 /*
@@ -1935,6 +2022,8 @@ step_gmu_firmware(void)
 #define GMU_DCACHE_CONFIG       GMU_WORD(0x4c01)
 #define GMU_SYS_BUS_CONFIG      GMU_WORD(0x4c0f)
 #define GMU_PWR_COL_INTER_FRAME_CTRL GMU_WORD(0x50c0)
+#define GMU_PWR_COL_INTER_FRAME_HYST GMU_WORD(0x50c1)
+#define GMU_PWR_COL_SPTPRAC_HYST GMU_WORD(0x50c2)
 #define GMU_RPMH_CTRL           GMU_WORD(0x50e8)
 #define GMU_RPMH_CTRL_ALL       0xf11           /* the RPMh interface, and every vote the firmware may cast */
 #define GMU_CX_FAL_INTF         GMU_WORD(0x50f0)
@@ -1996,7 +2085,12 @@ legacy_rpmh_ucode(void)
 	 */
 	static const uint32_t rsc_program[5] = { 0xa7a506a0, 0xa1e6a6e7, 0xa2e081e1, 0xe9a982e2, 0x0020e8a8 };
 	static const uint32_t pdc_program[5] = { 0xfebea1e1, 0xa5a4a3a2, 0x8382a6e0, 0xbce3e284, 0x002081fc };
-	/* (the commands' addresses are RPMh's: 0x30010 mx.lvl, 0x30000 cx.lvl, 0x30090 the GPU's rail on this SoC) */
+	/*
+	 * (the commands' addresses are RPMh's: 0x30010 mx.lvl, 0x30000 cx.lvl and a third, 0x30090 in the vendor's source for
+	 * this GPU and 0x30080 for the older one. This phone's command database lists 0x30090 as "xo.lvl", the crystal's, and
+	 * its "gfx.lvl" is 0x30050: the third command is the oscillator's vote, which the GPU's wake-up needs, not the GPU's
+	 * rail -- an earlier version of this driver replaced it with gfx.lvl's address, which left the oscillator unasked.)
+	 */
 	struct {
 		uint32_t control, enable, wait, msgid;  /* word offsets in the PDC's configuration block */
 		uint32_t address[3], data[3];
@@ -2004,12 +2098,12 @@ legacy_rpmh_ucode(void)
 		{ 0x1572, 0x1573, 0x1574, 0x1575, { 0x30010, 0x30000, 0x30090 }, { 1, 0, 0 } },
 		{ 0x15d6, 0x15d7, 0x15d8, 0x15d9, { 0x30010, 0x30000, 0x30090 }, { 2, 3, 3 } },
 	};
-	/* the vendor's third address is the GPU rail of its SoC; this phone's command database has its own */
-	uint32_t gfx_address = rpmh_resource("gfx.lvl", NULL, NULL);
+	/* the third address is the oscillator's: the command database's own, which is the vendor's where they agree */
+	uint32_t xo_address = rpmh_resource("xo.lvl", NULL, NULL);
 
-	printf("adreno: %u: the GPU rail's RPMh address: %#x (the vendor's source says %#x)\n", step, gfx_address, tcs[0].address[2]);
-	if (gfx_address != 0) {
-		tcs[0].address[2] = tcs[1].address[2] = gfx_address;
+	printf("adreno: %u: the oscillator's RPMh address: %#x (the vendor's source says %#x)\n", step, xo_address, tcs[0].address[2]);
+	if (xo_address != 0) {
+		tcs[0].address[2] = tcs[1].address[2] = xo_address;
 	}
 
 	announce("give the GMU's RPMh channel and the GPU's power domain sequencer their programs, as the vendor's driver "
@@ -2124,6 +2218,18 @@ step_gmu_start(void)
 	put(&gmu, "icache_config", GMU_ICACHE_CONFIG, 1);
 	put(&gmu, "dcache_config", GMU_DCACHE_CONFIG, 1);
 	put(&gmu, "pwr_col_inter_frame_ctrl", GMU_PWR_COL_INTER_FRAME_CTRL, 0x9c40400);
+	if (gpu_model->legacy_gmu) {
+		/*
+		 * The vendor's a6xx_gmu_power_config() for the Adreno 640, which has the IFPC feature (idle level 3): the hysteresis
+		 * of both power collapses (0xa1680 XO cycles: 300 us, then 0.5 us) and their enable bits, which are what make the
+		 * GMU's hardware power the 3D core's shader block (SPTPRAC) by itself. Without them the GMU brings the core's power
+		 * domain on and no more: its clock never starts.
+		 */
+		put(&gmu, "pwr_col_inter_frame_hyst", GMU_PWR_COL_INTER_FRAME_HYST, 0x000a1680);
+		set(&gmu, "pwr_col_inter_frame_ctrl", GMU_PWR_COL_INTER_FRAME_CTRL, 0x3);           /* IFPC_ENABLE_MASK */
+		put(&gmu, "pwr_col_sptprac_hyst", GMU_PWR_COL_SPTPRAC_HYST, 0x000a1680);
+		set(&gmu, "pwr_col_inter_frame_ctrl", GMU_PWR_COL_INTER_FRAME_CTRL, 0x5);           /* SPTP_ENABLE_MASK */
+	}
 	set(&gmu, "rpmh_ctrl", GMU_RPMH_CTRL, GMU_RPMH_CTRL_ALL);
 	put(&gmu, "gmu2host_intr_clr", GMU_GMU2HOST_INTR_CLR, 0xffffffff);
 
@@ -2511,14 +2617,63 @@ step_core_power(void)
 		return false;
 	}
 
+	uint32_t vote_first = 1;
+
+	(void)PE_parse_boot_argn("adreno_vote_first", &vote_first, sizeof(vote_first));      /* (=0: the vote after the request) */
+	if (gpu_model->legacy_gmu && vote_first != 0) {
+		/*
+		 * The vendor's order: the first speed vote is part of the GMU's start, before the request for the core. The older
+		 * firmware does not answer it then, but it has to be in its queue: without it the request for the core is handled
+		 * in a dozen microseconds and not granted (the GMU does not know what speed to power the core for).
+		 */
+		announce("the speed wanted, before the request for the core, as the vendor's gmu_start() does");
+		(void)hfi_send("the speed wanted", HFI_GX_BW_PERF_VOTE, vote, 4);
+	}
 	announce("ask the GMU to power the 3D core and keep it powered");
 	get(&gmu, "sptprac_pwr_clk_status", GMU_SPTPRAC_PWR_CLK_STATUS);
 	get(&gpucc, "gx_gdscr", GPUCC_GX_GDSCR);
 	put(&gmu, "host2gmu_intr_set", GMU_HOST2GMU_INTR_SET, GMU_CORE_REQUEST);
 	/* (the older GMU takes a second or more to bring the rail up: the vendor's driver waits for it too) */
-	for (int i = 0; i < (gpu_model->legacy_gmu ? 100000 : 5000) && !(granted & GMU_CORE_GRANTED); i++) {
-		sleep_us(100);
-		granted = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
+	{
+		/*
+		 * (watched, on the older GMU: every 20 ms the registers that show how far it gets -- the 3D core's PLL (+0x00 to
+		 * +0x44 of the GPU clock controller), the controller's registers around the 3D core's domain (+0x1000 to +0x10bc),
+		 * the GMU's power state words -- and a line for each change. Reads only.)
+		 */
+		enum { PLL_WORDS = 18, DOMAIN_WORDS = 48, GMU_WORDS = 4, WATCH = PLL_WORDS + DOMAIN_WORDS + GMU_WORDS };
+		uint32_t before[WATCH], now[WATCH], lines = 0;
+		uint64_t began = watch_us();
+		bool first = true;
+
+		for (int i = 0; i < (gpu_model->legacy_gmu ? 100000 : 5000) && !(granted & GMU_CORE_GRANTED); i++) {
+			sleep_us(100);
+			granted = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
+			if (gpu_model->legacy_gmu && i % 200 == 0 && lines < 120) {
+				for (unsigned w = 0; w < PLL_WORDS; w++) {
+					now[w] = rd(gpucc.base + 4 * w);
+				}
+				for (unsigned w = 0; w < DOMAIN_WORDS; w++) {
+					now[PLL_WORDS + w] = rd(gpucc.base + 0x1000 + 4 * w);
+				}
+				now[PLL_WORDS + DOMAIN_WORDS + 0] = rd(gmu.base + GMU_SPTPRAC_PWR_CLK_STATUS);
+				now[PLL_WORDS + DOMAIN_WORDS + 1] = rd(gmu.base + GMU_RPMH_POWER_STATE);
+				now[PLL_WORDS + DOMAIN_WORDS + 2] = rd(gmu.base + GMU_GMU2HOST_INTR_INFO);
+				now[PLL_WORDS + DOMAIN_WORDS + 3] = rd(gmu.base + GMU_CM3_FW_INIT_RESULT);
+				for (unsigned w = 0; w < WATCH; w++) {
+					if (first || now[w] != before[w]) {
+						uint64_t t = watch_us() - began;
+
+						printf("adreno: %u: watch +%llu.%03llu ms: %s +%#x: %s%#x%s\n", step, t / 1000, t % 1000,
+						    w < PLL_WORDS ? "gpucc pll0" : w < PLL_WORDS + DOMAIN_WORDS ? "gpucc" : "gmu",
+						    w < PLL_WORDS ? 4 * w : w < PLL_WORDS + DOMAIN_WORDS ? 0x1000 + 4 * (w - PLL_WORDS) : w - PLL_WORDS - DOMAIN_WORDS,
+						    first ? "" : "", now[w], first ? " (first look)" : "");
+						lines++;
+					}
+					before[w] = now[w];
+				}
+				first = false;
+			}
+		}
 	}
 	printf("adreno: %u: the GMU's answer to the request for the core came after %s\n", step,
 	    (granted & GMU_CORE_GRANTED) ? "all" : "none of the wait");
