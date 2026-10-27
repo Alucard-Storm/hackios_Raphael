@@ -1522,20 +1522,26 @@ step_image(void)
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the audio DSP's memory (0x86700000, 64 MB: memory of nobody's until TrustZone "
+	announce("put the image's segments into the audio DSP's memory (memory of nobody's until TrustZone "
 	    "starts the DSP), with zeroes where a segment is longer than its file, and read them back");
 	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
 	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, ADSP_MEMORY);
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
 
-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
-			printf("adsp: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+		if ((image.segment[s].at & 7) || (image.segment[s].memory_size & 3)) {
+			printf("adsp: %u: a segment that does not begin at a multiple of eight bytes and end at a multiple of four: not written\n", step);
 			ml_io_unmap((vm_offset_t)dsp_memory, ADSP_MEMORY_SIZE);
 			return false;
 		}
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+		uint32_t whole = image.segment[s].memory_size & ~7u;
+
+		for (uint32_t i = 0; i < whole; i += 8) {
 			to[i / 8] = segment_word(s, i);
+		}
+		if (image.segment[s].memory_size & 4) {
+			/* (the SM8150's image has a segment of 0x54 bytes) */
+			((volatile uint32_t *)(to + whole / 8))[0] = (uint32_t)segment_word(s, whole);
 		}
 		written += image.segment[s].file_size;
 		cleared += image.segment[s].memory_size - image.segment[s].file_size;
@@ -1544,8 +1550,13 @@ step_image(void)
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
 
-		for (uint32_t i = 0; i < image.segment[s].memory_size; i += 8) {
+		uint32_t whole = image.segment[s].memory_size & ~7u;
+
+		for (uint32_t i = 0; i < whole; i += 8) {
 			wrong += from[i / 8] != segment_word(s, i);
+		}
+		if (image.segment[s].memory_size & 4) {
+			wrong += ((volatile uint32_t *)(from + whole / 8))[0] != (uint32_t)segment_word(s, whole);
 		}
 	}
 	printf("adsp: %u: %u segments, %llu bytes written and %llu cleared; read back, %llu words of eight bytes differ\n", step,
