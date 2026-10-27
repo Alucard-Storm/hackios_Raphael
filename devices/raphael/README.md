@@ -12,6 +12,7 @@ worked example. The sections below are the notes in the order they were found.
 | iOS 16.5 | home screen, software drawing |
 | Touch | works (`touchscreen=2`, Goodix GT9886 on I2C) |
 | Buttons | power, volume up and down read and delivered (on with `touchscreen=`, or `buttons=1`); polled over SPMI, no interrupts |
+| Vibration | works (`haptic=5`): the PM8150B's haptics block, an ERM motor, driven by iOS's actuator waveforms as taps and vibrations |
 | Battery | SOC, voltage and charging state read (`battery=1`); temperature and current words not confirmed |
 | GPU (Adreno 640) | steps 1 to 16 pass; step 17 (the GMU's clock request) does not yet, see the end |
 | Wi-Fi, cellular, sound, haptics, cameras | not started (the Wi-Fi chip lives inside the modem) |
@@ -257,3 +258,13 @@ arbiter is the same (version 5, same addresses). Power and volume down are KPDPW
 PM8150's power-on block (slave 0, 0x800, type 1 subtype 4, "qcom,qpnp-power-on"); volume up is GPIO6 of the PM8150
 (0xc500, input with pull-up, left by the firmware). Read-only, as on the POCO. Checked by hand: every press and release
 was logged with a sensible hold time. Confirmed by hand in iOS: the buttons work.
+
+## Vibration
+
+`hakios.haptic_pmic.c`. The motor is not an I2C chip as on the POCO but the PM8150B's haptics block (SPMI slave 3,
+0xc000; type 0x15, subtype 0x09; an ERM, 3000 mV max in Android's tree), written through the arbiter's write channel
+(ours) the way the flashlight is on the POCO: a list of registers, every write read back, any surprise ends all
+writing. The constant-voltage source is used (a tap is a 40 ms drive, a vibration a long one, 1.5 s at most). The
+current-limit register (0x52) does not take Android's 0x02 and is left as the firmware has it. `haptic=1` looks,
+`haptic=2` buzzes once (`haptic_ms`), `haptic=5` is iOS's. Felt on the phone, and iOS's feedbacks work. One hang was
+seen once in a haptic=5 run, about 20 s into the userland start, and did not come back in the next run; not tied to the driver.
