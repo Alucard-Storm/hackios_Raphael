@@ -1325,7 +1325,9 @@ step_gmu_memory(void)
 
 #define SMMU_S2CR_FAULT         (2u << 16)
 #define SMMU_SMR_VALID          (1u << 31)
-#define SMMU_STREAM_MASK        0x400           /* dt: the second cell of every "iommus" of this SMMU */
+#define SMMU_STREAM_MASK        0x400           /* dt: the second cell of every "iommus" of this SMMU ... */
+/* ... but the 3D core's own on the Redmi K20 Pro: <&smmu 0x0 0x401> (streams 0 and 1 in one entry); the hypervisor takes only these */
+static uint32_t smr_mask = SMMU_STREAM_MASK;
 #define SMMU_CBAR_STAGE_1       (1u << 16 | 3u << 8 | 0xfu << 12)       /* our tables alone decide; weakest defaults */
 #define SMMU_CBA2R(n)           (0x800 + 4 * (n))                       /* in the second page, like CBAR */
 #define SMMU_CBA2R_64_BIT       1
@@ -1556,8 +1558,8 @@ static bool
 space_stream(struct gpu_space *space, uint32_t match, uint32_t stream)
 {
 	put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
-	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
-	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
+	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | smr_mask << 16 | stream);
+	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | smr_mask << 16 | stream) ||
 	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context) {
 		printf("adreno: %u: the SMMU did not take what was written: stream %u is not going through context %u\n", step,
 		    stream, space->context);
@@ -1597,10 +1599,10 @@ space_on(struct gpu_space *space, uint32_t match, uint32_t stream)
 	}
 	put(&smmu, "cb sctlr", context + SMMU_CB_SCTLR, SMMU_SCTLR_ON | space->control);
 	put(&smmu, "s2cr", SMMU_S2CR(match), space->context);
-	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream);
+	put(&smmu, "smr", SMMU_SMR(match), SMMU_SMR_VALID | smr_mask << 16 | stream);
 
 	/* the global ones are the hypervisor's to grant: see what it made of them */
-	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | SMMU_STREAM_MASK << 16 | stream) ||
+	if (get(&smmu, "smr", SMMU_SMR(match)) != (SMMU_SMR_VALID | smr_mask << 16 | stream) ||
 	    (get(&smmu, "s2cr", SMMU_S2CR(match)) & 0x300ff) != space->context ||
 	    (get(&smmu, "cbar", smmu_page + SMMU_CBAR(space->context)) & 0x30000) != (SMMU_CBAR_STAGE_1 & 0x30000) ||
 	    !(get(&smmu, "cb sctlr", context + SMMU_CB_SCTLR) & 1) ||
@@ -2718,7 +2720,13 @@ step_core_power(void)
  * the protection of registers against user programs' commands, counters).
  */
 #define CORE_STREAM             0
-#define CORE_MATCH              0
+/*
+ * The entries of the stream table this SMMU's hypervisor lets us write are not the POCO's: entry 0 reads back 0 after
+ * a write on the Redmi K20 Pro (the entry 1 of the GMU's streams does take). So the 3D core's two streams use the
+ * first entries that do; the POCO's stay 0 and 2.
+ */
+static uint32_t core_match = 0, second_match = 2;
+#define CORE_MATCH              core_match
 #define PTE_CORE                (PTE_GMU | PTE_UNPRIVILEGED)
 #define PTE_READ_ONLY           (1ull << 7)     /* Linux gives the core its microcode so (MSM_BO_GPU_READONLY) */
 #define CORE_RING_ADDRESS       0x01000000u
@@ -2791,7 +2799,7 @@ static struct gpu_space core_space = { .name = "the 3D core", .context = 0, .con
 static struct gpu_space second_space = {
 	.name = "the 3D core's second stream", .context = 2, .control = SMMU_SCTLR_SERVE_AFTER_FAULT,
 };
-#define SECOND_MATCH            2
+#define SECOND_MATCH            second_match
 static bool second_space_is_on, second_stream_is_on;
 static struct gpu_block core_ring, core_sqe, core_scratch, core_target;
 static bool core_space_is_on, core_runs, zap_is_loaded;
@@ -2899,7 +2907,18 @@ step_core_space(void)
 
 	announce("give the SMMU's context 0 these tables and send the 3D core's requests (stream 0) through it");
 	core_space_is_on = true;
-	if (!space_on(&core_space, CORE_MATCH, CORE_STREAM)) {
+	if (gpu_model->legacy_gmu) {
+		/* streams 0 and 1 in one entry, as the device tree has them (mask 0x401), the GMU's entry being 1 */
+		smr_mask = 0x401;
+		core_match = 0;
+		if (!space_on(&core_space, core_match, CORE_STREAM)) {
+			smr_mask = SMMU_STREAM_MASK;
+			return false;
+		}
+		smr_mask = SMMU_STREAM_MASK;
+		stream1 = 0;                    /* (stream 1 goes through the same entry) */
+		printf("adreno: %u: the 3D core's streams 0 and 1 go through entry %u of the stream table (mask 0x401)\n", step, core_match);
+	} else if (!space_on(&core_space, CORE_MATCH, CORE_STREAM)) {
 		return false;
 	}
 	if (stream1 == 2) {
