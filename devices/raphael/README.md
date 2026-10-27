@@ -11,6 +11,7 @@ worked example. The sections below are the notes in the order they were found.
 | Kernel | boots to user space; the SM8150 virtual timer is INTID 19 (`vtimer-intid` in the device tree) |
 | iOS 16.5 | home screen, software drawing |
 | Touch | works (`touchscreen=2`, Goodix GT9886 on I2C) |
+| Buttons | power, volume up and down read and delivered (on with `touchscreen=`, or `buttons=1`); polled over SPMI, no interrupts |
 | Battery | SOC, voltage and charging state read (`battery=1`); temperature and current words not confirmed |
 | GPU (Adreno 640) | steps 1 to 16 pass; step 17 (the GMU's clock request) does not yet, see the end |
 | Wi-Fi, cellular, sound, haptics, cameras | not started (the Wi-Fi chip lives inside the modem) |
@@ -248,3 +249,11 @@ GMU needs before its first power request (the vendor sets up the 3D core's SMMU 
 GPU clock controller (the Android driver only configures PLL1: the firmware must do the 3D core's), the bus table's votes, and a
 decode of the GMU's event log. The step is a faithful port of the vendor's flow up to this point; what stops it is internal to
 the GMU firmware's power-up sequence.
+
+## Buttons
+
+`hakios.buttons.c` is the POCO's driver with this phone's peripherals (chosen from the device tree's model). The PMIC
+arbiter is the same (version 5, same addresses). Power and volume down are KPDPWR_N (bit 0) and RESIN_N (bit 1) of the
+PM8150's power-on block (slave 0, 0x800, type 1 subtype 4, "qcom,qpnp-power-on"); volume up is GPIO6 of the PM8150
+(0xc500, input with pull-up, left by the firmware). Read-only, as on the POCO. Checked by hand: every press and release
+was logged with a sensible hold time. Whether iOS reacts to them (lock, volume HUD) is not looked at yet.

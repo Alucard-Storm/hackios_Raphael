@@ -49,6 +49,7 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/hakios.input.h>
 #include <sys/systm.h>
 
@@ -230,9 +231,15 @@ find_channel(struct peripheral *p, uint32_t channels)
 
 /* the power-on block, of the kind that is split in two ("generation 3"): this is its half for the operating system */
 #define PON_TYPE                0x01
-#define PON_SUBTYPE_HLOS        0x09
-#define PON_KPDPWR              0x80            /* in the status and in the interrupt registers */
-#define PON_RESIN               0x40
+/*
+ * What differs between the phones: the POCO's PMK8350 has the split block (subtype 9; power is bit 7, volume down
+ * bit 6); the Redmi K20 Pro's PM8150 has the older single one at 0x800 ("qcom,qpnp-power-on": KPDPWR_N bit 0, RESIN_N
+ * bit 1), and volume up is GPIO6 of the PM8150 itself (slave 0, peripheral 0xc5), not of a second chip. The arbiter
+ * is the same version 5 at the same addresses on both. (select_model, below)
+ */
+static uint8_t pon_subtype_from = 0x09, pon_subtype_to = 0x09;
+static uint8_t PON_KPDPWR = 0x80;               /* in the status and in the interrupt registers */
+static uint8_t PON_RESIN = 0x40;
 
 /* a GPIO of the low or medium voltage kind */
 #define GPIO_TYPE               0x10
@@ -369,7 +376,7 @@ pon_inputs(void)
 	const char *problem;
 	uint8_t r[8], more[2];
 
-	printf("buttons: next: read the status and the interrupt setup of %s (registers 0x1310 to 0x1319)\n", pon.name);
+	printf("buttons: next: read the status and the interrupt setup of %s (registers 0x10 to 0x19 of it)\n", pon.name);
 	problem = spmi_read(&pon, REG_RT_STATUS, r, 8);
 	if (problem == NULL) {
 		problem = spmi_read(&pon, REG_INT_LATCHED, more, 2);
@@ -431,11 +438,34 @@ say_summary(void)
 }
 
 static void
+select_model(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) != kSuccess ||
+	    strcmp((const char *)prop, "raphael") != 0) {
+		return;
+	}
+	pon.name = "the PM8150's power-on block";
+	pon.id = 0x008;
+	pin.name = "GPIO6 of the PM8150";
+	pin.id = 0x0c5;
+	pon_subtype_from = 0x01;                /* not known until the log says: any, and the log shows it */
+	pon_subtype_to = 0xff;
+	PON_KPDPWR = 0x01;
+	PON_RESIN = 0x02;
+}
+
+static void
 buttons_thread(void *parameter, __unused wait_result_t result)
 {
 	uint32_t steps = (uint32_t)(uintptr_t)parameter, version, channels;
 	bool pon_known, pin_known;
 
+	select_model();
 	printf("buttons: step 1: map the PMIC arbiter (%#lx, %#lx, %#lx) and read its version\n", ARB_CORE_PHYS, ARB_CNFG_PHYS,
 	    ARB_OBSERVER_PHYS);
 	arb_core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
@@ -463,7 +493,7 @@ buttons_thread(void *parameter, __unused wait_result_t result)
 	}
 
 	printf("buttons: step 3: the first transfers on the SPMI bus\n");
-	pon_known = identify(&pon, PON_TYPE, PON_SUBTYPE_HLOS, PON_SUBTYPE_HLOS);
+	pon_known = identify(&pon, PON_TYPE, pon_subtype_from, pon_subtype_to);
 	pin_known = identify(&pin, GPIO_TYPE, GPIO_SUBTYPE_LV, GPIO_SUBTYPE_MV_VIN3);
 	if (steps < 4) {
 		goto out;
