@@ -86,6 +86,7 @@
 #include <mach/vm_param.h>
 #include <vm/memory_types.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/errno.h>
 #include <sys/kauth.h>
 #include <sys/stat.h>
@@ -287,7 +288,29 @@ put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 
 /* ---- the shared memory (hakios.wifi.c, step 1) --------------------------------------------------- */
 
-#define SMEM_PHYS               0x80900000UL
+/*
+ * What differs between the phones (the first row is the POCO X5 Pro, the default; the second the Redmi K20 Pro, chosen by
+ * the device tree's model, select_model()): where the shared memory, the command database and the audio DSP's memory
+ * are, and how the DSP is rung. The SM8150 has no IPCC: its processors ring each other through bits of one register of
+ * the APCS mailbox (0x17c0000c, dt: mboxes <&apcs 8> of qcom,glink/adsp, qcom,ipc = <&syscon 0 10> of qcom,smp2p-adsp,
+ * bit 0 for the always-on processor) and the interrupts come as ordinary SPIs, which nothing here waits for: the
+ * shared memory is polled, and the doorbells heard are only counted where there is an IPCC to count them on.
+ */
+struct adsp_model {
+	const char *name;                       /* /arm-io device_type */
+	uint64_t smem, cmd_db, dsp_memory;
+	uint32_t dsp_memory_size;
+	bool ipcc;                              /* else the APCS mailbox */
+	uint64_t doorbell_phys;                 /* the IPCC, or the APCS mailbox */
+	uint32_t apcs_ipc, apcs_aop_bit, apcs_glink_bit, apcs_smp2p_bit;
+};
+static const struct adsp_model adsp_models[] = {
+	{ "redwood", 0x80900000UL, 0x80860000UL, 0x86700000UL, 0x04000000u, true, 0x00408000UL, 0, 0, 0, 0 },
+	{ "raphael", 0x86000000UL, 0x85f20000UL, 0x8be00000UL, 0x02200000u, false, 0x17c00000UL, 0x0c, 0, 8, 10 },
+};
+static const struct adsp_model *adsp_model = &adsp_models[0];
+
+#define SMEM_PHYS               (adsp_model->smem)
 #define SMEM_SIZE               0x00200000u
 #define SMEM_US                 0
 #define SMEM_ADSP               2               /* dt: qcom,remote-pid of qcom,smp2p-adsp and qcom,glink/adsp */
@@ -625,7 +648,23 @@ static struct block aoss = { "mailbox", 0x0c300000, 0x400 };
 #define IPCC_GLINK              0u
 #define IPCC_SMP2P              2u
 
-static struct block ipcc = { "ipcc", 0x00408000, 0x1000 };
+static struct block ipcc = { "ipcc", 0x00408000, 0x1000 };        /* (on the SM8150 the APCS mailbox: select_model) */
+
+enum { DB_AOP, DB_GLINK, DB_SMP2P };
+
+/* Ring the always-on processor (DB_AOP) or the audio DSP (DB_GLINK, DB_SMP2P). */
+static void
+ring(unsigned who)
+{
+	if (adsp_model->ipcc) {
+		static const uint32_t signal[] = { IPCC_AOP << 16 | 0, IPCC_LPASS << 16 | IPCC_GLINK, IPCC_LPASS << 16 | IPCC_SMP2P };
+
+		wr(ipcc.base + IPCC_SEND, signal[who]);
+	} else {
+		wr(ipcc.base + adsp_model->apcs_ipc, 1u << (who == DB_AOP ? adsp_model->apcs_aop_bit :
+		    who == DB_GLINK ? adsp_model->apcs_glink_bit : adsp_model->apcs_smp2p_bit));
+	}
+}
 
 static struct {
 	uint32_t glink, smp2p, said;
@@ -640,7 +679,7 @@ static struct {
 static void
 doorbells(void)
 {
-	for (unsigned i = 0; i < 8; i++) {
+	for (unsigned i = 0; adsp_model->ipcc && i < 8; i++) {
 		uint32_t who = rd(ipcc.base + IPCC_RECEIVED);
 
 		if (who == IPCC_NOBODY || who >> 16 != IPCC_LPASS) {
@@ -676,7 +715,7 @@ mailbox_wait(uint32_t offset, uint32_t value, uint32_t ms)
 static void
 ring_aop(void)
 {
-	wr(ipcc.base + IPCC_SEND, IPCC_AOP << 16 | 0);
+	ring(DB_AOP);
 }
 
 /* Linux's qmp_open(), as hakios.wifi.c does it; what is done already is found done. Under the mailbox's lock. */
@@ -794,7 +833,7 @@ out:
  * the list of its levels that the boot loader's command database keeps (cmd-db.c), the first
  * position at or above the level wanted.
  */
-#define CMD_DB_PHYS             0x80860000UL
+#define CMD_DB_PHYS             (adsp_model->cmd_db)
 #define CMD_DB_SIZE             0x20000UL
 
 struct cmd_db_slave {
@@ -965,7 +1004,7 @@ step_survey(void)
 	struct smp2p words;
 	uint32_t size = 0;
 
-	announce("read our partition with the audio DSP in the shared memory (0x80900000), and its items");
+	announce("read our partition with the audio DSP in the shared memory, and its items");
 	show_partition();
 	if (dsp_words(&words)) {
 		show_words("the DSP's item (443) is there: it has run since the phone was started", &words);
@@ -977,14 +1016,16 @@ step_survey(void)
 	    smem_item(479, &size) ? "there" : "NOT THERE", smem_item(480, &size) ? "there" : "not there (the DSP makes it)");
 	show_crash_reason();
 	need(&ipcc);
-	printf("adsp: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	if (adsp_model->ipcc) {
+		printf("adsp: %u: the doorbells say %#x\n", step, rd(ipcc.base + IPCC_RECEIVED));
+	}
 	return smem_partition(SMEM_US, SMEM_ADSP, &size, &size) != 0;
 }
 
 /* ---- step 2: the firmware -------------------------------------------------------------------------- */
 
-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
-#define ADSP_MEMORY_SIZE        0x04000000u
+#define ADSP_MEMORY             ((uint32_t)adsp_model->dsp_memory)     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
+#define ADSP_MEMORY_SIZE        (adsp_model->dsp_memory_size)
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
 
 
@@ -1310,7 +1351,7 @@ dsp_listen(const struct smp2p *theirs)
 		    step, theirs->flags, smp2p_restart_acked);
 		smem_poke(our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (smp2p_restart_acked ? SMP2P_RESTART_ACK : 0));
 		settle();
-		wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+		ring(DB_SMP2P);
 	}
 }
 
@@ -1348,7 +1389,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	snprintf(last_write, sizeof(last_write), "step %u asked the audio DSP to stop", step);
 	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring(DB_SMP2P);
 	asked = now = now_us();
 	while (now - asked < bound_ms * 1000ull) {
 		if (dsp_words(&theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
@@ -1363,7 +1404,7 @@ dsp_ask_to_stop(uint32_t bound_ms)
 	    (now - asked) % 1000, state);
 	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring(DB_SMP2P);
 	return (state & DSP_STOP_ACK) != 0;
 }
 
@@ -1389,7 +1430,9 @@ dsp_shutdown(const char *why)
 	}
 	printf("adsp: %u: THE AUDIO DSP IS SHUT DOWN\n", step);
 	need(&ipcc);
-	wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+	if (adsp_model->ipcc) {
+		wr(ipcc.base + IPCC_DISABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+	}
 	doorbells();
 	dsp_started = false;
 	mailbox_send("{class: image, res: load_state, name: adsp, val: off}");
@@ -1633,7 +1676,7 @@ step_our_item(void)
 	settle();
 	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
 	need(&ipcc);
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_SMP2P);
+	ring(DB_SMP2P);
 	if (!smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || smp2p_entry(&ours, OUR_ENTRY_STOP) < 0) {
 		printf("adsp: %u: OUR ITEM DOES NOT READ BACK AS WRITTEN\n", step);
 		return false;
@@ -1672,11 +1715,13 @@ step_start(void)
 	announce("listen for the audio DSP's doorbells, ask RPMh for its rails, tell the always-on processor that its image is "
 	    "loaded, and ask TrustZone to authenticate the image and let the DSP out of reset");
 	need(&ipcc);
-	for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_LPASS; i++) {
-		put(&ipcc, "heard", IPCC_CLEAR, rang);
+	if (adsp_model->ipcc) {
+		for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY && rang >> 16 == IPCC_LPASS; i++) {
+			put(&ipcc, "heard", IPCC_CLEAR, rang);
+		}
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
+		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_GLINK);
 	}
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_SMP2P);
-	put(&ipcc, "listened for", IPCC_ENABLE, IPCC_LPASS << 16 | IPCC_GLINK);
 	bzero(&doorbell, sizeof(doorbell));
 	lck_mtx_lock(&dsp_lock);
 	if (!rails(384)) {
@@ -1971,7 +2016,7 @@ glink_put(const void *first, uint32_t first_length, const void *second, uint32_t
 	settle();
 	smem_poke(glink.descriptor + GLINK_OUR_HEAD, (head + padded) % glink.ours_size);
 	settle();
-	wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_GLINK);
+	ring(DB_GLINK);
 	glink.said++;
 	return true;
 }
@@ -2213,7 +2258,7 @@ glink_pump(void)
 		}
 		case GLINK_READ_NOTIFY:
 			glink_advance(length);
-			wr(ipcc.base + IPCC_SEND, IPCC_LPASS << 16 | IPCC_GLINK);
+			ring(DB_GLINK);
 			break;
 		case GLINK_CLOSE:
 			glink_advance(length);
@@ -3257,6 +3302,27 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 	thread_terminate(current_thread());
 }
 
+/* Point the blocks at this phone's. Without a known phone the POCO's stay. */
+static void
+select_model(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) != kSuccess) {
+		return;
+	}
+	for (unsigned i = 0; i < sizeof(adsp_models) / sizeof(adsp_models[0]); i++) {
+		if (strcmp((const char *)prop, adsp_models[i].name) == 0) {
+			adsp_model = &adsp_models[i];
+		}
+	}
+	ipcc.name = adsp_model->ipcc ? "ipcc" : "apcs mailbox";
+	ipcc.phys = (uint32_t)adsp_model->doorbell_phys;
+}
+
 /* Called while the system starts (drivers/input/hakios.input.c), after the Wi-Fi's start has been set going. */
 void
 hakios_adsp_init(void)
@@ -3264,6 +3330,7 @@ hakios_adsp_init(void)
 	uint32_t on = 0;
 	thread_t thread;
 
+	select_model();
 	PE_parse_boot_argn("adsp_step", &last_step, sizeof(last_step));
 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
 		return;
