@@ -355,6 +355,7 @@ hakios_audio_init(void)
 	report_call = thread_call_allocate(audio_report, NULL);
 	audio_recording_init();
 	hakios_virtio_sound_init();
+	hakios_tfa_init();
 	hakios_speaker_init();
 	hakios_haptic_init();
 	hakios_torch_init();

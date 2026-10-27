@@ -6,6 +6,9 @@ standard bsd/dev/hakios.audio.c
 	help    /dev/hakios-audio, the sound Darwin plays, to whatever plays it; and where the camera, flashlight, motor
 	help    and speaker drivers are started from
 
+standard bsd/dev/hakios.speaker_tfa.c
+	help    the Redmi K20 Pro's speaker amplifier, a TFA9874 on I2C (tfa=N); a phone without one does nothing
+
 driver ADSP
 	file    bsd/dev/hakios.adsp.c
 	help    the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too.
