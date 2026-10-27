@@ -276,6 +276,16 @@ GL=1 SYSTEM=1 REST=1 userland/build.sh          # not PREBUILT=1: it compiles; t
 make phone DEVICE=raphael                       # with gpu=1 in PHONE_ARGS
 ```
 
+**Two workarounds and a trap.** (1) `glenv=FD_MESA_DEBUG=sysmem` (in `PHONE_ARGS`): with Mesa's default tiled (GMEM) rendering the home screen shows
+artifacts (rounded corners drawn as octagons, black boxes behind icon labels, thin lines), with plain rendering it does not and it feels
+smoother. Switching off LRZ, UBWC, fp16 or binning (`nolrz`, `noubwc`, `nofp16`, `nobin`) does not help, nor do the vendor's tiling-mode
+registers and graphics-memory range (now written, `adreno_tiling` chooses); only skipping the tiles does. The artifacts look like tiles that
+were loaded from memory as black and stored back over what was not redrawn: the tiled path's load is the suspect, not found yet.
+(2) The tearing ("a game without V-Sync") is the display side: nothing paces the GPU's drawing against the panel's scanout.
+**The trap:** `gpu=1` used to skip steps 10 to 12 as on the POCO; started from a fresh boot (Android has just used the GPU and left its zap
+shader loaded in TrustZone) the first call of step 19 ("give up the zap shader") hung the phone, every time; runs started from the loader after a
+clean run did not. All the steps run now. One TrustZone call at a time (`hakios_scm_lock`) across the GPU, audio, Wi-Fi and modem drivers.
+
 Known: one SMMU fault from the 3D core is logged at teardown (address 0x1600, after the core is stopped). Not looked at.
 
 ## Buttons
