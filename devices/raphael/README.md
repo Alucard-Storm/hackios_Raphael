@@ -13,6 +13,7 @@ worked example. The sections below are the notes in the order they were found.
 | Touch | works (`touchscreen=2`, Goodix GT9886 on I2C) |
 | Buttons | power, volume up and down read and delivered (on with `touchscreen=`, or `buttons=1`); polled over SPMI, no interrupts |
 | Vibration | works (`haptic=5`): the PM8150B's haptics block, an ERM motor, driven by iOS's actuator waveforms as taps and vibrations |
+| Audio DSP (`adsp_step=11`) | boots, GLINK/QRTR/APR up, the audio services answer; no sound out yet (below) |
 | Battery | SOC, voltage and charging state read (`battery=1`); temperature and current words not confirmed |
 | GPU (Adreno 640) | steps 1 to 16 pass; step 17 (the GMU's clock request) does not yet, see the end |
 | Wi-Fi, cellular, sound, haptics, cameras | not started (the Wi-Fi chip lives inside the modem) |
@@ -268,3 +269,24 @@ writing. The constant-voltage source is used (a tap is a 40 ms drive, a vibratio
 current-limit register (0x52) does not take Android's 0x02 and is left as the firmware has it. `haptic=1` looks,
 `haptic=2` buzzes once (`haptic_ms`), `haptic=5` is iOS's. Felt on the phone, and iOS's feedbacks work. One hang was
 seen once in a haptic=5 run, about 20 s into the userland start, and did not come back in the next run; not tied to the driver.
+
+## Sound: the audio DSP is up, the speaker is not yet
+
+`hakios.adsp.c` takes a model table. Steps 1 to 11 pass (`adsp_step=11`; firmware: `fw-audio/` from `pull-firmware.sh`, put into
+the small image with `ADSP=1 REST=1 PREBUILT=1 userland/build.sh`). What differs from the POCO:
+
+- shared memory 0x86000000 (not 0x80900000), command database 0x85f20000, the DSP's memory 0x8be00000, 34 MB (the image fits
+  exactly); the image has a segment of 0x54 bytes (a 4-byte tail is written)
+- no IPCC: the doorbells are bits of one register of the APCS mailbox (0x17c0000c): the always-on processor bit 0, GLINK to the
+  DSP bit 8, SMP2P bit 10. Nothing waits for the interrupts (SPIs 156, 158): the shared memory is polled
+- the DSP makes GLINK's descriptor (item 478) and its own queue (480) and leaves ours (479) to us: step 8 makes it, 16 KB
+- result: the DSP says it is up 13 ms after TrustZone starts it, eight QRTR services, the audio services' versions over APR
+
+The speaker is not the POCO's. The device tree and Android's machine driver (`techpack/audio/asoc/sm8150.c`) say: an NXP
+TFA9874 smart amplifier on I2C (`qupv3_se1_i2c` at 0x884000, address 0x34, reset GPIO 59, interrupt GPIO 141), fed from the DSP's
+quaternary MI2S interface (AFE port 0x1006, `msm-dai-q6-mi2s.3`), not TDM; plus WSA881x amplifiers behind the WCD9340 codec
+(SLIMbus, SoundWire) for the other speaker/earpiece paths, not looked at. Android's log: "TFA9874 detected", container
+`/vendor/firmware/tfa98xx.cnt` (510 bytes: one device, one profile "speaker", a dummy patch), speaker 6.72 ohm, F0 810 Hz.
+What is left for sound=N: the MI2S pins and port through AFE (hakios.sound.c is the TDM version), the TFA9874's I2C bring-up
+(power, clocks, the container's register lists; `hakios.speaker.c` is the POCO's AW amplifiers), the guard's numbers for this
+speaker (it has the amplifier's own protection DSP only with the real patch), and /dev/hakios-audio.
