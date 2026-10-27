@@ -259,9 +259,24 @@ after the notes of step 17 above (the GMU powered the 3D core's switch and never
 - The SMMU's hypervisor takes the 3D core's stream-match entry only **as the device tree has it**: streams 0 and 1 in one entry with
   mask 0x401 (`gfx3d_user`), not the POCO's 0x400.
 
-What is not done: the iOS side. The userland GPU path (`gpu=1`: Mesa's OpenGL ES, `libhakios.gpu`, the iokit `hakios_gpu_*`) was built
-for the POCO's Adreno 660; the 640 needs its device id and its tiling/UBWC choices in Mesa, and the zap-shader and fuse
-(speed bin) details. Run the bring-up with `adreno=22` (see the top of this section for the arguments).
+### iOS on the GPU (2026-10-27)
+
+**iOS draws with the Adreno 640** (`gpu=1`): the window server reports "OpenGL ES 3.2 Mesa 25.0.7; FD640", copies IOSurfaces into
+textures by the GPU, and a 4-minute run drew over 1700 frames from 2711 ring submissions, with no hang or panic (about 2 to 3 ms a frame
+late in the run, 10 to 20 ms while the home screen was starting). Nothing of Mesa needed porting (its freedreno driver has the 640);
+the kernel's service reports this phone's chip id (0x06040001), 1 MB of graphics memory, highest bank bit 15 and the speed bin from the
+fuse cell 0x4130 (read as 0 here). To reproduce:
+
+```sh
+sudo apt install meson                          # the rest of Mesa's build tools are fetched by the script
+./tools/mk-mesa.sh                              # downloads Mesa 25.0.7 (45 MB, checked), builds libOSMesa.8.dylib for iOS
+# (Ubuntu names its LLVM tools llvm-ar-18 and so on: put version-less links to llvm-ar, llvm-ranlib, llvm-strip on PATH)
+GL=1 SYSTEM=1 REST=1 userland/build.sh          # not PREBUILT=1: it compiles; the GL library goes into the small image,
+                                                # the audio DSP's firmware into the system image (they do not fit together in the small one)
+make phone DEVICE=raphael                       # with gpu=1 in PHONE_ARGS
+```
+
+Known: one SMMU fault from the 3D core is logged at teardown (address 0x1600, after the core is stopped). Not looked at.
 
 ## Buttons
 
