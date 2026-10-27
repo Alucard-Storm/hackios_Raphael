@@ -77,6 +77,7 @@
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/systm.h>
 #include <sys/hakios.audio.h>
 #include <vm/vm_kern.h>
@@ -209,6 +210,26 @@ static struct block tlmm = { "pin controller", 0x0f100000, 0x100000 };
 #define CFG_8MA                 (3u << 6)
 #define CFG_OUTPUT              (1u << 9)
 
+/*
+ * The Redmi K20 Pro (raphael) has no TDM speaker: its amplifier (an NXP TFA9874) sits on the quaternary MI2S interface,
+ * AFE port 0x1006, bit clock and frame sync on GPIO 137 and 138, data out on 139 (one line, stereo), the DSP the
+ * master, 16 bits at 48 kHz (Android's mixer: QUAT_MI2S_RX 48000 / S16_LE / 2; sm8150.c). The pins' function is
+ * "qua_mi2s", number 1 on all of them (pinctrl-sm8150.c), and the TLMM's south tile is at 0x3d00000 where the pin
+ * n's registers are 0x1000 * n further, as here. (model_raphael(), set by the first call that needs it.)
+ */
+static bool mi2s;
+
+static const struct {
+	unsigned pin;
+	const char *name;
+	uint32_t cfg, io;               /* Android's active state */
+} mi2s_pins[] = {
+	{ 137, "gpio137 (bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 138, "gpio138 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
+	{ 139, "gpio139 (data out)", CFG_MI2S0 | CFG_8MA, 0 },
+	{ 140, "gpio140 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
+};
+
 static const struct {
 	unsigned pin;
 	const char *name;
@@ -219,21 +240,25 @@ static const struct {
 	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
 	{ 99, "gpio99 (data out)", CFG_MI2S0 | CFG_8MA, 0 },
 };
-#define TDM_PINS                (sizeof(tdm_pins) / sizeof(tdm_pins[0]))
-static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
+#define TDM_PINS                (mi2s ? sizeof(mi2s_pins) / sizeof(mi2s_pins[0]) : sizeof(tdm_pins) / sizeof(tdm_pins[0]))
+#define PIN(i)                  (mi2s ? mi2s_pins[i].pin : tdm_pins[i].pin)
+#define PIN_NAME(i)             (mi2s ? mi2s_pins[i].name : tdm_pins[i].name)
+#define PIN_CFG(i)              (mi2s ? mi2s_pins[i].cfg : tdm_pins[i].cfg)
+#define PIN_IO(i)               (mi2s ? mi2s_pins[i].io : tdm_pins[i].io)
+static uint32_t found_cfg[8], found_io[8];
 static bool pins_taken;
 
 static void
 pins_on(void)
 {
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		found_cfg[i] = get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
-		found_io[i] = get(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin));
+		found_cfg[i] = get(&tlmm, PIN_NAME(i), GPIO_CFG(PIN(i)));
+		found_io[i] = get(&tlmm, PIN_NAME(i), GPIO_IO(PIN(i)));
 	}
 	pins_taken = true;
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), tdm_pins[i].io);
-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), tdm_pins[i].cfg);
+		put(&tlmm, PIN_NAME(i), GPIO_IO(PIN(i)), PIN_IO(i));
+		put(&tlmm, PIN_NAME(i), GPIO_CFG(PIN(i)), PIN_CFG(i));
 	}
 }
 
@@ -244,9 +269,9 @@ pins_off(void)
 		return;
 	}
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), found_cfg[i]);
-		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), found_io[i] & 2);
-		get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
+		put(&tlmm, PIN_NAME(i), GPIO_CFG(PIN(i)), found_cfg[i]);
+		put(&tlmm, PIN_NAME(i), GPIO_IO(PIN(i)), found_io[i] & 2);
+		get(&tlmm, PIN_NAME(i), GPIO_CFG(PIN(i)));
 	}
 	pins_taken = false;
 }
@@ -335,12 +360,15 @@ command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const
 #define AFE_MODULE_CLOCK_SET                    0x0001028fu
 #define AFE_PARAM_ID_CLOCK_SET                  0x00010290u
 
-#define PORT                    0x9000          /* PRI_TDM_RX_0 */
+#define PORT                    (mi2s ? 0x1006 : 0x9000)        /* QUAT_MI2S_RX, or PRI_TDM_RX_0 */
 #define GROUP                   0x9100          /* PRI_TDM_RX */
 #define GROUP_OTHER_PORT        0x9002
 #define PORT_INVALID            0xffff
 #define CLOCK_PRI_TDM_IBIT      0x200
 #define CLOCK_INVERT_COUPLE_NO  4
+#define CLOCK_QUAT_MI2S_IBIT    0x106
+#define CLOCK_COUPLE_NO         1
+#define AFE_PARAM_ID_I2S_CONFIG 0x0001020du
 #define RATE                    48000
 #define SLOTS                   2
 #define SLOT_BITS               32
@@ -349,6 +377,13 @@ command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const
 struct afe_param {
 	uint32_t module, param;
 	uint16_t size, reserved;
+} __attribute__((packed));
+
+struct afe_i2s {
+	uint32_t version;
+	uint16_t bit_width, channel_mode, mono_stereo, ws_src;
+	uint32_t sample_rate;
+	uint16_t data_format, reserved;
 } __attribute__((packed));
 
 struct afe_clock_set {
@@ -424,6 +459,14 @@ afe_clock(bool on)
 {
 	struct afe_clock_set clock = { 1, CLOCK_PRI_TDM_IBIT, RATE * SLOT_BITS * SLOTS, CLOCK_INVERT_COUPLE_NO, 0, on };
 
+	if (mi2s) {
+		/* 16 bits x 2 channels x 48 kHz: Android's Q6AFE_LPASS_IBIT_CLK_1_P536_MHZ for the quaternary interface */
+		clock.id = CLOCK_QUAT_MI2S_IBIT;
+		clock.hz = RATE * 16 * 2;
+		clock.attribute = CLOCK_COUPLE_NO;
+		return afe_service_param(on ? "the quaternary MI2S bit clock (0x106) at 1.536 MHz, on" : "the MI2S bit clock, off",
+		           AFE_MODULE_CLOCK_SET, AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
+	}
 	return afe_service_param(on ? "the TDM bit clock (0x200) at 3.072 MHz, on" : "the TDM bit clock, off", AFE_MODULE_CLOCK_SET,
 	           AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
 }
@@ -445,10 +488,24 @@ afe_on(void)
 		                            .offsets = { 0, 4, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff } };
 	uint16_t start[2] = { PORT, 0 };
 
-	announce("the DSP is asked for the TDM interface's bit clock, the group, the port and its start (AFE)");
+	announce(mi2s ? "the DSP is asked for the quaternary MI2S interface's bit clock, the port and its start (AFE)" :
+	    "the DSP is asked for the TDM interface's bit clock, the group, the port and its start (AFE)");
 	clock_on = afe_clock(true);
 	if (!clock_on) {
 		return false;
+	}
+	if (mi2s) {
+		struct afe_i2s i2s = { .version = 1, .bit_width = 16, .channel_mode = 1 /* SD0 */, .mono_stereo = 1 /* stereo */,
+			               .ws_src = 1 /* internal: we are the master */, .sample_rate = RATE, .data_format = 0 };
+		uint16_t start_mi2s[2] = { PORT, 0 };
+
+		if (!afe_port_param("the port 0x1006: 16 bits, line SD0, stereo, 48 kHz, our frame sync", AFE_MODULE_AUDIO_DEV_INTERFACE,
+		    AFE_PARAM_ID_I2S_CONFIG, &i2s, sizeof(i2s))) {
+			return false;
+		}
+		port_on = command("the port 0x1006, started", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START, start_mi2s, sizeof(start_mi2s), 0,
+		    NULL);
+		return port_on;
 	}
 	group_on = afe_service_param("the group 0x9100: ports 0x9000 0x9002, 2 slots of 32 bits, 48 kHz", AFE_MODULE_GROUP_DEVICE,
 	    AFE_PARAM_ID_GROUP_DEVICE_TDM_CONFIG, &group, sizeof(group)) &&
@@ -1417,16 +1474,17 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		ok = false;
 		hakios_adsp_apr_events(events);
 	}
-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+	announce(mi2s ? "the MI2S pins (GPIO 137 to 140) to the interface, as Android's active state has them" :
+	    "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
 	pins_on();
 	if (!afe_on()) {
 		goto out;
 	}
 	sleep_ms(20);
-	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
-	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
-	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
-	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
+	pin_activity(mi2s ? 137 : 97, mi2s ? "the bit clock (gpio137)" : "the bit clock (gpio97)", &changes, &ones);
+	pin_activity(mi2s ? 138 : 100, mi2s ? "the frame sync (gpio138)" : "the frame sync (gpio100)", &sync_changes, &sync_ones);
+	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE CLOCK AND FRAME SYNC RUN at the pins" :
+	    "THE PINS DO NOT SHOW A RUNNING CLOCK");
 	if (level == 1) {
 		sleep_ms(seconds * 1000);
 		ok = true;
@@ -1504,6 +1562,18 @@ hakios_sound_dsp_up(void)
 	}
 	if (level > 4) {
 		level = 4;
+	}
+	{
+		DTEntry entry;
+		void const *prop;
+		unsigned int size;
+
+		if (SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+		    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess && strcmp((const char *)prop, "raphael") == 0) {
+			mi2s = true;
+			tlmm.phys = 0x03d00000;         /* the pin controller's south tile, where GPIO 59 and 136 to 142 are */
+			tlmm.size = 0x300000;
+		}
 	}
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));
