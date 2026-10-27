@@ -4,5 +4,6 @@
 
 driver HAPTIC
 	file    bsd/dev/hakios.haptic.c
+	file    bsd/dev/hakios.haptic_pmic.c
 	help    the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms
 	help    from fw-haptic/

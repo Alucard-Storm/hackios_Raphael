@@ -986,6 +986,9 @@ hakios_haptic_init(void)
 {
 	thread_t thread;
 
+	if (hakios_haptic_pmic_init()) {
+		return;         /* this phone's motor is a PMIC's: hakios.haptic_pmic.c */
+	}
 	if (!PE_parse_boot_argn("haptic", &level, sizeof(level)) || level == 0) {
 		return;
 	}
@@ -1001,6 +1004,7 @@ hakios_haptic_init(void)
 void
 hakios_haptic_quiesce(void)
 {
+	hakios_haptic_pmic_quiesce();
 	if (released && tlmm != 0) {
 		leaving = true;
 		reset_pin(false);

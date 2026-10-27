@@ -30,6 +30,7 @@ camera   bsd/dev/hakios.camera.c
 camera   bsd/dev/hakios.torch.c
 
 haptic   bsd/dev/hakios.haptic.c
+haptic   bsd/dev/hakios.haptic_pmic.c
 
 audio    bsd/dev/hakios.adsp.c
 audio    bsd/dev/hakios.audio.c
