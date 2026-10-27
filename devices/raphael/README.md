@@ -15,7 +15,7 @@ worked example. The sections below are the notes in the order they were found.
 | Vibration | works (`haptic=5`): the PM8150B's haptics block, an ERM motor, driven by iOS's actuator waveforms as taps and vibrations |
 | Sound (`adsp=1 sound=4`) | works: iOS's sounds play through the bottom speaker (the audio DSP, MI2S, a TFA9874 amplifier); earpiece, microphones, headphones not done |
 | Battery | SOC, voltage and charging state read (`battery=1`); temperature and current words not confirmed |
-| GPU (Adreno 640) | steps 1 to 16 pass; step 17 (the GMU's clock request) does not yet, see the end |
+| GPU (Adreno 640) | all 22 bring-up steps pass: the core is powered, runs commands and fills a picture the panel shows; iOS does not use it yet (Mesa, `libhakios.gpu`) |
 | Wi-Fi, cellular, sound, haptics, cameras | not started (the Wi-Fi chip lives inside the modem) |
 
 ## Quick start
@@ -238,19 +238,30 @@ heartbeat, which needs another core to run), without which a healthy run is decl
 watches and a hang saves no log. Next: step 17 (the 3D core's power through the GMU's messages: the older firmware's protocol
 is HFI version 1), then the 3D core's microcode and zap shader, then a frame.
 
-### Step 17, where it stands (2026-10-27)
+### Steps 17 to 22 (2026-10-27): the Adreno 640 draws
 
-The GMU takes the three configuration messages of its protocol (the speed table, the bus table, "start the core firmware": the
-table layouts are the POCO's, and the speeds are the Adreno 640's 215 to 600 MHz at RPMh rail levels 64 to 384). Asked to power the
-3D core (the "OOB" request, bits 30 and 31 as on the POCO), the GMU **brings the GX power switch on** (`gx_gdscr` becomes
-`0x8222000`, bit 6 of `sptprac_pwr_clk_status` clears: "GX power domain off") but **the 3D core's clock does not start** (bit 7,
-"GX clock off", stays set) and the GMU never grants the request, within 10 s (its own log suggests it keeps working for about
-1.5 s). Tried: the vendor's order of the messages (the speed vote only after the core is powered and started), the GPU rail's
-RPMh address from the command database (`0x30050`, not the vendor source's `0x30090`), a longer wait. Not yet looked at: what the
-GMU needs before its first power request (the vendor sets up the 3D core's SMMU context and the GBIF halt first), the PLL0 of the
-GPU clock controller (the Android driver only configures PLL1: the firmware must do the 3D core's), the bus table's votes, and a
-decode of the GMU's event log. The step is a faithful port of the vendor's flow up to this point; what stops it is internal to
-the GMU firmware's power-up sequence.
+**All 22 steps of the bring-up pass on the phone**: the 3D core has power (17), its SMMU context works (18), TrustZone runs the zap
+shader (19), the command processor starts and takes commands (20), the core leaves secure mode and writes our memory on command
+(21), and it fills 10 MB with three bands of colour that the panel shows (22; the log's pixels match what was commanded). What it took,
+after the notes of step 17 above (the GMU powered the 3D core's switch and never granted the request):
+
+- **The speed vote has to be queued before the request for the core.** The older firmware does not answer a vote sent before it
+  (it did not answer then, and does not now), but the vendor's `gmu_start()` sends the first one before the request and the
+  firmware, with no speed to power the core for, drops the request in about 12 microseconds. This was the key: sent first (default;
+  `adreno_vote_first=0` turns it off), the GMU grants the request and the core's clock runs. The GMU's event log (0x21: the HFI
+  messages, with their headers; 0x23: its own steps) is what showed it.
+- The vendor's power configuration for this GPU (it has the IFPC feature): hysteresis 0xa1680 in both power-collapse registers and
+  their enable bits, so the frame control ends at 0x9c40407.
+- PLL1 as Android's clock driver leaves it (L 26, alpha 0xaaa; the 3D core's own PLL0 is the GMU firmware's to set up).
+- The PDC's third wake-up command is **`xo.lvl`** (0x30090 here; 0x30080 for the older GPU), the oscillator's vote: the earlier "fix"
+  that put the GPU rail's `gfx.lvl` (0x30050) there was wrong. (The command database lists the rails 0x30000 to 0x30090 in the order
+  cx, mx, ebi, lcx, lmx, gfx, mss, ddr, mmcx, xo.)
+- The SMMU's hypervisor takes the 3D core's stream-match entry only **as the device tree has it**: streams 0 and 1 in one entry with
+  mask 0x401 (`gfx3d_user`), not the POCO's 0x400.
+
+What is not done: the iOS side. The userland GPU path (`gpu=1`: Mesa's OpenGL ES, `libhakios.gpu`, the iokit `hakios_gpu_*`) was built
+for the POCO's Adreno 660; the 640 needs its device id and its tiling/UBWC choices in Mesa, and the zap-shader and fuse
+(speed bin) details. Run the bring-up with `adreno=22` (see the top of this section for the arguments).
 
 ## Buttons
 
