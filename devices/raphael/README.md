@@ -13,7 +13,7 @@ worked example. The sections below are the notes in the order they were found.
 | Touch | works (`touchscreen=2`, Goodix GT9886 on I2C) |
 | Buttons | power, volume up and down read and delivered (on with `touchscreen=`, or `buttons=1`); polled over SPMI, no interrupts |
 | Vibration | works (`haptic=5`): the PM8150B's haptics block, an ERM motor, driven by iOS's actuator waveforms as taps and vibrations |
-| Audio DSP (`adsp_step=11`) | boots, GLINK/QRTR/APR up, the audio services answer; no sound out yet (below) |
+| Sound (`adsp=1 sound=4`) | works: iOS's sounds play through the bottom speaker (the audio DSP, MI2S, a TFA9874 amplifier); earpiece, microphones, headphones not done |
 | Battery | SOC, voltage and charging state read (`battery=1`); temperature and current words not confirmed |
 | GPU (Adreno 640) | steps 1 to 16 pass; step 17 (the GMU's clock request) does not yet, see the end |
 | Wi-Fi, cellular, sound, haptics, cameras | not started (the Wi-Fi chip lives inside the modem) |
@@ -270,7 +270,11 @@ current-limit register (0x52) does not take Android's 0x02 and is left as the fi
 `haptic=2` buzzes once (`haptic_ms`), `haptic=5` is iOS's. Felt on the phone, and iOS's feedbacks work. One hang was
 seen once in a haptic=5 run, about 20 s into the userland start, and did not come back in the next run; not tied to the driver.
 
-## Sound: the audio DSP is up, the speaker is not yet
+## Sound
+
+**Status: iOS's sounds play through the bottom speaker** (`adsp=1 sound=4 sound_below=96`, in `PHONE_ARGS`; checked by ear with the
+lock-screen and message sounds; the amplifier stayed at 42 to 46 C with no alarm). Not done: the earpiece and the other speaker paths
+(WSA881x behind the WCD9340 over SoundWire/SLIMbus), the microphones, headphones, a measured gain scale.
 
 `hakios.adsp.c` takes a model table. Steps 1 to 11 pass (`adsp_step=11`; firmware: `fw-audio/` from `pull-firmware.sh`, put into
 the small image with `ADSP=1 REST=1 PREBUILT=1 userland/build.sh`). What differs from the POCO:
@@ -282,11 +286,25 @@ the small image with `ADSP=1 REST=1 PREBUILT=1 userland/build.sh`). What differs
 - the DSP makes GLINK's descriptor (item 478) and its own queue (480) and leaves ours (479) to us: step 8 makes it, 16 KB
 - result: the DSP says it is up 13 ms after TrustZone starts it, eight QRTR services, the audio services' versions over APR
 
-The speaker is not the POCO's. The device tree and Android's machine driver (`techpack/audio/asoc/sm8150.c`) say: an NXP
-TFA9874 smart amplifier on I2C (`qupv3_se1_i2c` at 0x884000, address 0x34, reset GPIO 59, interrupt GPIO 141), fed from the DSP's
-quaternary MI2S interface (AFE port 0x1006, `msm-dai-q6-mi2s.3`), not TDM; plus WSA881x amplifiers behind the WCD9340 codec
-(SLIMbus, SoundWire) for the other speaker/earpiece paths, not looked at. Android's log: "TFA9874 detected", container
-`/vendor/firmware/tfa98xx.cnt` (510 bytes: one device, one profile "speaker", a dummy patch), speaker 6.72 ohm, F0 810 Hz.
-What is left for sound=N: the MI2S pins and port through AFE (hakios.sound.c is the TDM version), the TFA9874's I2C bring-up
-(power, clocks, the container's register lists; `hakios.speaker.c` is the POCO's AW amplifiers), the guard's numbers for this
-speaker (it has the amplifier's own protection DSP only with the real patch), and /dev/hakios-audio.
+The speaker path (`hakios.sound.c`, model-aware):
+
+- the DSP's quaternary MI2S interface, AFE port 0x1006, bit clock 0x106 at 1.536 MHz (16 bits x 2 x 48 kHz), the DSP the master,
+  one data line (SD0) stereo; the pins GPIO 137 (bit clock), 138 (frame sync), 139, 140, function 1 (`qua_mi2s`), in the TLMM's
+  south tile at 0x3d00000
+- the audio memory goes through the apps SMMU as stream 0x1b21 (the POCO's is 0x1801), same SMMU base, same low-nibble rule
+- the amplifier is an NXP TFA9874 (`hakios.speaker_tfa.c`, behind the speaker interface `hakios_speaker_*`): I2C address 0x34 on QUP
+  wrapper 0's engine 1 (0x884000; SDA/SCL GPIO 114/115 function 1; the clocks are GCC 0x17278, vote 0x5200c bits 11, 6, 7), reset
+  GPIO 59 (high then low: the chip runs with it low), 8-bit register addresses and 16-bit big-endian values. Identity 0x0c74
+  ("V1.14"). The configuration is Android's: the rev-specific writes of `tfa9874_specific()`, the container's (`tfa98xx.cnt`,
+  510 bytes) three registers and 33 bit fields, the first items of its "speaker" profile, and 16-bit slots; the chip is powered
+  up only while the MI2S clock runs (it locks to it: "clocks stable" is bit 7 of register 0x11), AMPE set, power-down and AMPE
+  cleared when iOS is silent for three seconds
+- faults: the over-current bit, the alarm-state bit, a lost clock (register 0x10), and the chip's own temperature (register 0x16)
+  over 85 C. Bits 0, 1, 2 and 4 of register 0x10 read 0x0016 at idle and while Android plays: they are not faults
+- the level: `sound_below` eighths of a dB under Android's; the amplifier's total gain field (TDMSPKG, Android's profile has 4) is
+  set from it by a provisional map (20 dB or more under: 0, 12: 1, 6: 2, 2: 3, 0: 4). The step of that field is not measured yet
+
+How it was found: Android's own I2C traffic to the amplifier recorded with ftrace while it played a key tone (register
+addresses and the on/off sequence), the container decoded with the structures of its `tfa_container.h`, and the driver's
+start-up order. Reading the amplifier's registers from Android's sysfs while it was powered down hung that phone: do not.
+Test runs that you interact with need `PHONE_SECS` long enough (the run ends, and the phone leaves iOS, when it expires).
