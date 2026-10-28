@@ -69,9 +69,11 @@
 #include <pexpert/pexpert.h>
 #include <sys/systm.h>
 #include <sys/hakios.audio.h>
+#include <vm/memory_types.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern kern_return_t thread_terminate(thread_t thread);
 extern void loader_log_putc(char c);
 
@@ -741,7 +743,7 @@ hakios_speaker_prepare(const uint8_t *acf, uint64_t size)
 		return hakios_tfa_prepare();
 	}
 	if (tlmm == 0) {
-		tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
+		tlmm = ml_io_map_unmappable(TLMM_PHYS, TLMM_SIZE, VM_WIMG_IO);
 	}
 	broken = false;
 	say("speaker: the amplifiers are prepared as Android's driver prepares them; the I2C pins as found:\n");
@@ -1237,7 +1239,7 @@ static void
 probe_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	if (tlmm == 0) {
-		tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
+		tlmm = ml_io_map_unmappable(TLMM_PHYS, TLMM_SIZE, VM_WIMG_IO);
 	}
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
 	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */

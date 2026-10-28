@@ -25,8 +25,10 @@
 #include <pexpert/pexpert.h>
 #include <sys/hakios.audio.h>
 #include <sys/systm.h>
+#include <vm/memory_types.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern kern_return_t thread_terminate(thread_t thread);
 extern void loader_log_putc(char c);
 
@@ -504,9 +506,9 @@ hw_start(void)
 	if (hw_up) {
 		return true;
 	}
-	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
-	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
-	se = ml_io_map(SE_PHYS, SE_SIZE);
+	gcc = ml_io_map_unmappable(GCC_PHYS, GCC_SIZE, VM_WIMG_IO);
+	tlmm = ml_io_map_unmappable(TLMM_PHYS, TLMM_SIZE, VM_WIMG_IO);
+	se = ml_io_map_unmappable(SE_PHYS, SE_SIZE, VM_WIMG_IO);
 	if (!clocks_on()) {
 		say("tfa: the serial engine's clocks do not start\n");
 		return false;

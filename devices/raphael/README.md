@@ -281,7 +281,7 @@ behind icon labels, thin lines); `glenv=FD_MESA_DEBUG=sysmem` (plain rendering) 
 while the UCHE's graphics-memory range (step 20, the vendor's) starts at 0x100000; Mesa addresses the memory with it, so tiles were loaded and stored at the
 wrong place. It must match: 0x100000 for the 640 (found by comparing with HeliumStudio-Dev's raphael-bringup, which has the same tiling registers and says so
 in a comment). Switching off LRZ, UBWC, fp16 or binning did not help; the vendor's tiling-mode registers and range are written (`adreno_tiling` chooses).
-Screen tearing (a game without V-Sync) remains: nothing paces the GPU's drawing against the panel's scan-out.
+Screen tearing is eliminated by hardware TE scanout synchronization (`fb_scan=1`), ported and adapted from HeliumStudio-Dev's bring-up (https://github.com/HeliumStudio-Dev/hackios-xnu-kernel, branch `helium/raphael-bringup`, commit `8a3135e`): the bootloader enables DPU command-mode ping-pong autorefresh (`0x0ae71030`), and `MiniIOMobileFramebuffer` latches triple-buffered page flips to the panel's physical TE line without software shearing.
 **The trap:** `gpu=1` used to skip steps 10 to 12 as on the POCO; started from a fresh boot (Android has just used the GPU and left its zap
 shader loaded in TrustZone) the first call of step 19 ("give up the zap shader") hung the phone, every time; runs started from the loader after a
 clean run did not. All the steps run now. One TrustZone call at a time (`hakios_scm_lock`) across the GPU, audio, Wi-Fi and modem drivers.

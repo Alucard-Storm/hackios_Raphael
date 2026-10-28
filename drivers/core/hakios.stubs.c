@@ -74,6 +74,16 @@ void hakios_adreno_init(void) {}
 void hakios_adreno_quiesce(void) {}
 void hakios_adreno_stop(void) {}
 void hakios_adreno_minute(void) {}
+/* the panel's page flips and scan (drivers/gpu/hakios.display.c and hakios.adreno.c), which the framebuffer asks for: none here */
+#include <stdbool.h>
+#include <stdint.h>
+int hakios_display_scan_start(void) { return 0; }
+const void *hakios_display_scan(void) { return (void *)0; }
+uint64_t hakios_display_next_frame_ns(void) { return 0; }
+int raphael_display_init(uint32_t width, uint32_t height, uint32_t stride) { (void)width; (void)height; (void)stride; return 0; }
+void *raphael_display_back(bool preserve) { (void)preserve; return (void *)0; }
+bool raphael_display_present(void) { return false; }
+void raphael_display_quiesce(void) {}
 #endif
 
 #ifndef HAKIOS_WIFI

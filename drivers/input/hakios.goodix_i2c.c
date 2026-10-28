@@ -30,8 +30,10 @@
 #include <pexpert/pexpert.h>
 #include <sys/hakios.input.h>
 #include <sys/systm.h>
+#include <vm/memory_types.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern kern_return_t thread_terminate(thread_t thread);
 
 #define GCC_PHYS        0x00100000UL
@@ -465,9 +467,9 @@ touch_thread(__unused void *parameter, __unused wait_result_t wait)
 	const char *why;
 	uint64_t next_note, now;
 
-	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
-	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
-	se = ml_io_map(SE_PHYS, SE_SIZE);
+	gcc = ml_io_map_unmappable(GCC_PHYS, GCC_SIZE, VM_WIMG_IO);
+	tlmm = ml_io_map_unmappable(TLMM_PHYS, TLMM_SIZE, VM_WIMG_IO);
+	se = ml_io_map_unmappable(SE_PHYS, SE_SIZE, VM_WIMG_IO);
 	if (gcc == 0 || tlmm == 0 || se == 0) {
 		printf("goodix-i2c: cannot map the registers\n");
 		thread_terminate(current_thread());

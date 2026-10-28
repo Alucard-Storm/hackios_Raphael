@@ -24,6 +24,7 @@ storage  bsd/dev/hakios.apfs_check.c
 storage  bsd/dev/hakios.virtio_blk.c
 
 gpu      bsd/dev/hakios.adreno.c
+gpu      bsd/dev/hakios.display.c
 gpu      iokit/Kernel/hakios.gpu.cpp
 
 camera   bsd/dev/hakios.camera.c

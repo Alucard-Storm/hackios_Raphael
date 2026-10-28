@@ -39,6 +39,19 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 #include "MiniIOSurface.h"
 
 extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
+/* the panel's scan (bsd/dev/hakios.display.c; sys/hakios.display.h, which iokit/ does not see) */
+struct hakios_display_scan {
+	int ok;
+	uint32_t lines, shown, millihz;
+	uint64_t line_ns, frame_ns;
+};
+extern "C" int hakios_display_scan_start(void);
+extern "C" const struct hakios_display_scan * hakios_display_scan(void);
+extern "C" uint64_t hakios_display_next_frame_ns(void);
+extern "C" int raphael_display_init(uint32_t width, uint32_t height, uint32_t stride);
+extern "C" void *raphael_display_back(bool preserve);
+extern "C" bool raphael_display_present(void);
+static IOLock *gScanoutLock;
 
 /* IOConnectCallMethod selectors of the framebuffer user client (Darwin userland 16.5) */
 enum {
@@ -81,7 +94,7 @@ enum {
 
 #define FRAME_TIMES             64                      /* milliseconds told apart between two frames */
 #define FRAME_PAUSE             90                      /* from so many on, nothing was moving: not a slow frame */
-#define SWAP_GPU_MS             500                     /* a frame the GPU has not drawn by then is shown as it is */
+#define SWAP_GPU_MS             500                     /* unfinished frames are dropped */
 #define SWAP_HELD_MS            700                     /* a swap that cannot be taken by then is not shown at all */
 
 #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
@@ -275,10 +288,12 @@ measurePanel(__unused void * arg, __unused wait_result_t wr)
 	IOLog("MiniIOMobileFramebuffer: the panel: DSI interface's timing engine %s, %u refreshes in one second "
 	    "(frames are made at %u a second: fb_hz)\n", (on & 1) ? "on" : "OFF", second - first, refreshHz());
 }
+static uint32_t gScanHz;
 
 static inline uint32_t
 refreshHz(void)
 {
+	if (gScanHz) return gScanHz;
 	return gRefreshHz >= 1 && gRefreshHz <= 240 ? gRefreshHz : kFBRefreshHz;
 }
 static inline uint32_t
@@ -320,7 +335,8 @@ class IOMobileFramebuffer : public IOService
 
 public:
 	IOLock *        fLock;
-	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
+	uint8_t *       fBase;                  /* current composition target (boot framebuffer without page flipping) */
+	bool            fPageFlip;
 	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
 	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
 	MiniIOSurface * fDefaultSurface;
@@ -342,6 +358,7 @@ public:
 	uint8_t         fSwap[SWAP_QUEUE][SWAP_SIZE];   /* the swaps on their way to the panel (fb_queue), from fSwapFirst on */
 	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
 	unsigned        fSwapFirst, fSwapsWaiting;
+	uint32_t        fSwapCompleted;
 	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
 	 * (boot-arg fb_beat=0: at once): frames then follow each other at an even pace whatever
@@ -551,6 +568,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	}
 	fLock = IOLockAlloc();
 	fSwapLock = IOLockAlloc();
+	gScanoutLock = IOLockAlloc();
 	if (panel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
 		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
 		return false;
@@ -571,6 +589,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	fPanelWidth = vinfo.v_width;
 	fPanelHeight = vinfo.v_height;
 	fRowBytes = vinfo.v_rowbytes;
+	fPageFlip = raphael_display_init(fPanelWidth, fPanelHeight, fRowBytes) != 0;
 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
 	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
@@ -635,6 +654,11 @@ IOMobileFramebuffer::start(IOService * provider)
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	/* for who draws with the GPU (userland/src/eagl.c): a frame need not be waited for before it is handed over */
 	setProperty("HakiosWaitsForGPU", kOSBooleanTrue);
+	if (hakios_display_scan_start()) {
+		uint32_t hz;
+		const struct hakios_display_scan *scan = hakios_display_scan();
+		if (scan && !PE_parse_boot_argn("fb_hz", &hz, sizeof(hz))) gScanHz = (scan->millihz + 500) / 1000;
+	}
 	publishModes();
 	setName("disp0");
 	registerService();
@@ -1339,11 +1363,23 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	MiniIOSurface * recorded = NULL;
 	bool report;
 
+	bool complete = true;
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
-			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
+			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; frame dropped\n",
 			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+			complete = false;
 		}
+	}
+	if (!complete) {
+		IOLockLock(fSwapLock);
+		fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+		fSwapsWaiting--;
+		fSwapCompleted = swapWord(swap, SWAP_ID);
+		IOLockWakeup(fSwapLock, &fSwapCompleted, true);
+		IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
+		IOLockUnlock(fSwapLock);
+		return;
 	}
 	fStatWaiting += mach_absolute_time() - began;
 	began = ready = mach_absolute_time();
@@ -1351,7 +1387,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	if (fBeamIntf != 0) {
 		/* (on the panel when that scan reads it: that is the beat now, kept by the panel) */
 		fStatOnBeat++;
-	} else if (gOnTheBeat) {
+	} else if (gOnTheBeat && !fPageFlip) {
 		uint64_t period, aim, next;
 
 		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -1376,12 +1412,24 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	shown = began;
-	/* its turn has come: the swap after it may be handed over */
-	IOLockLock(fSwapLock);
-	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
-	fSwapsWaiting--;
-	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
-	IOLockUnlock(fSwapLock);
+	IOLockLock(gScanoutLock);
+	if (fPageFlip) {
+		int32_t src[4], dst[4];
+		MiniIOSurface *bottom = surfaces[0];
+		memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
+		memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
+		bool full = bottom != NULL && bottom->info.bytesPerElement == 4 && bottom->info.planeCount == 0 &&
+		    (src[2] <= 0 || src[3] <= 0 || (src[0] >= 0 && src[1] >= 0 &&
+		    (int64_t)src[0] + src[2] <= bottom->info.width &&
+		    (int64_t)src[1] + src[3] <= bottom->info.height)) &&
+		    (dst[2] <= 0 || dst[3] <= 0 || (dst[0] <= 0 && dst[1] <= 0 &&
+		    (int64_t)dst[0] + dst[2] >= fWidth && (int64_t)dst[1] + dst[3] >= fHeight));
+		fBase = (uint8_t *)raphael_display_back(!full);
+		if (fBase == NULL) {
+			fPageFlip = false;
+			fBase = (uint8_t *)vinfo.v_baseaddr;
+		}
+	}
 	IOLockLock(fLock);
 	if (fLastFrame != 0) {
 		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
@@ -1449,6 +1497,20 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 		}
 	}
+	if (fPageFlip && !raphael_display_present()) {
+		fPageFlip = false;
+		fBase = (uint8_t *)vinfo.v_baseaddr;
+	}
+	IOLockUnlock(gScanoutLock);
+	/* Release the surface only after the complete frame has reached scanout. */
+	IOLockLock(fSwapLock);
+	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+	fSwapsWaiting--;
+	fSwapCompleted = swapWord(swap, SWAP_ID);
+	IOLockWakeup(fSwapLock, &fSwapCompleted, true);
+	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
+	IOLockUnlock(fSwapLock);
+
 	drawn = mach_absolute_time();
 	if (recorded != NULL) {
 		record(recorded);
@@ -1645,6 +1707,13 @@ IOMobileFramebufferUserClient::armVSync(void)
 
 	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
+	if (hakios_display_scan() != NULL) {
+		uint64_t ahead;
+		nanoseconds_to_absolutetime(hakios_display_next_frame_ns(), &ahead);
+		fVSyncTime = now + (ahead ? ahead : period);
+		thread_call_enter_delayed(fVSyncCall, fVSyncTime);
+		return;
+	}
 	fVSyncTime += period;
 	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {
 		fVSyncTime = now + period;
@@ -1766,12 +1835,26 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		fOwner->present((const uint8_t *) args->structureInput);
 		return kIOReturnSuccess;
 
-	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
+	case kFBMethodSwapWait: {                       /* do not let the producer overwrite a surface being copied */
 		if (gTouchLat) {
 			hakios_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
 			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
 		}
+		if (args->scalarInputCount < 1) return kIOReturnBadArgument;
+		uint64_t deadline;
+		clock_interval_to_deadline(SWAP_HELD_MS, kMillisecondScale, &deadline);
+		IOLockLock(fOwner->fSwapLock);
+		while ((int32_t)((uint32_t)in[0] - fOwner->fSwapCompleted) > 0) {
+			if (IOLockSleepDeadline(fOwner->fSwapLock, &fOwner->fSwapCompleted,
+			    deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
+			    (int32_t)((uint32_t)in[0] - fOwner->fSwapCompleted) > 0) {
+				IOLockUnlock(fOwner->fSwapLock);
+				return kIOReturnTimeout;
+			}
+		}
+		IOLockUnlock(fOwner->fSwapLock);
 		return kIOReturnSuccess;
+	}
 	case kFBMethodSwapSignal:
 	case kFBMethodSwapCancel:
 	case kFBMethodSwapCancelAll:
@@ -1936,9 +2019,20 @@ MiniIOMobileFramebufferShow(const uint8_t * pixels, uint32_t width, uint32_t hei
 	if (vinfo.v_baseaddr == 0 || vinfo.v_depth != 32) {
 		return;
 	}
+	if (gScanoutLock != NULL) {
+		IOLockLock(gScanoutLock);
+	}
+	uint8_t *back = (uint8_t *)raphael_display_back(width < vinfo.v_width || height < vinfo.v_height);
+	uint8_t *base = back != NULL ? back : (uint8_t *)vinfo.v_baseaddr;
 	for (uint32_t y = 0; y < rows; y++) {
-		memcpy((void *) (vinfo.v_baseaddr + (size_t) y * vinfo.v_rowbytes), pixels + (size_t) y * rowBytes,
+		memcpy(base + (size_t) y * vinfo.v_rowbytes, pixels + (size_t) y * rowBytes,
 		    (size_t) columns * 4);
+	}
+	if (back != NULL) {
+		raphael_display_present();
+	}
+	if (gScanoutLock != NULL) {
+		IOLockUnlock(gScanoutLock);
 	}
 }
 

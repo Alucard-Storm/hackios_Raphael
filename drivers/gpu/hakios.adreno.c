@@ -104,10 +104,13 @@ extern lck_mtx_t hakios_scm_lock;
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
+#include <vm/memory_types.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
+extern int hakios_is_raphael(void);
 
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
@@ -3994,6 +3997,161 @@ static struct block disp_intf = { "intf1", 0x0ae36000, 0x300 };         /* dt: m
 #define INTF_FRAME_LINE_COUNT_EN 0x0a8
 #define INTF_FRAME_COUNT        0x0ac
 #define INTF_LINE_COUNT         0x0b0
+
+/* SM8150 scanout: compose into reserved off-screen memory, then latch VIG0 at TE. */
+static vm_offset_t raphael_mdp, raphael_te, raphael_irq, raphael_fb[3];
+static vm_offset_t raphael_dispcc;
+static uint32_t raphael_front, raphael_back = 1, raphael_fb_size;
+static bool raphael_flipping;
+extern uint64_t loader_framebuffer;
+extern void loader_set_framebuffer(uint64_t phys);
+
+int raphael_display_init(uint32_t width, uint32_t height, uint32_t stride);
+void *raphael_display_back(bool preserve);
+bool raphael_display_present(void);
+void raphael_display_quiesce(void);
+int raphael_display_scan_counter(uint32_t *line);
+
+int
+raphael_display_init(uint32_t width, uint32_t height, uint32_t stride)
+{
+	static const uint32_t interfaces[] = { 0x6b800, 0x6c000 };
+	vm_offset_t clock;
+
+	if (!hakios_is_raphael() || width != 1080 || height != 2340 || stride != 4320) {
+		return 0;
+	}
+	need(&gcc);
+	wr(gcc.base + 0xb00c, rd(gcc.base + 0xb00c) | 1);
+	clock = raphael_dispcc = ml_io_map_unmappable(0x0af00000, 0x10000, VM_WIMG_IO);
+	wr(clock + 0x2080, rd(clock + 0x2080) | 1);
+	sleep_ms(1);
+	if (!(rd(gcc.base + 0xb00c) & 1) || (rd(clock + 0x2080) & CBCR_OFF)) {
+		return 0;
+	}
+	raphael_mdp = ml_io_map_unmappable(0x0ae00000, 0x85000, VM_WIMG_IO);
+	if (rd(raphael_mdp + 0x5014) != 0x9c000000 || rd(raphael_mdp + 0x5024) != stride ||
+	    rd(raphael_mdp + 0x5000) != (height << 16 | width)) {
+		printf("raphael-display: unexpected firmware scanout, no flip\n");
+		return 0;
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		vm_offset_t p = raphael_mdp + interfaces[i];
+		printf("raphael-display: INTF%u TE %#x height %#x count %#x auto %#x frame %#x\n", i + 1,
+		    rd(p + 0x284), rd(p + 0x28c), rd(p + 0x298), rd(p + 0x2b4), rd(p + 0xac));
+		if (rd(p + 0x284) & 1) {
+			raphael_te = p;
+			raphael_irq = raphael_mdp + 0x6e800 + i * 0x100;
+		}
+	}
+	if (raphael_te == 0) {
+		printf("raphael-display: no active interface tear-check, no flip\n");
+		return 0;
+	}
+	raphael_fb_size = stride * height;
+	for (unsigned i = 0; i < 3; i++) {
+		/* Permanent I/O mappings share an 8 MiB submap; a single frame exceeds it. */
+		raphael_fb[i] = ml_io_map_unmappable(0x9c000000ull + i * 0xa00000ull,
+		    raphael_fb_size, VM_WIMG_WCOMB);
+		if (raphael_fb[i] == 0) {
+			return 0;
+		}
+	}
+	raphael_flipping = true;
+	loader_set_framebuffer(0x9c000000);
+	printf("raphael-display: three scanout buffers, VIG0/CTL0, hardware TE\n");
+	return 1;
+}
+
+void *
+raphael_display_back(bool preserve)
+{
+	if (!raphael_flipping) {
+		return NULL;
+	}
+	/* Preserve layers outside a partial swap without ever changing the scanned buffer. */
+	if (preserve) {
+		memcpy((void *)raphael_fb[raphael_back], (const void *)raphael_fb[raphael_front], raphael_fb_size);
+	}
+	return (void *)raphael_fb[raphael_back];
+}
+
+/* Read the TE phase without consuming the interrupt used to confirm page flips. */
+int
+raphael_display_scan_counter(uint32_t *line)
+{
+	if (!raphael_flipping || !(rd(gcc.base + 0xb00c) & 1) ||
+	    (rd(raphael_dispcc + 0x2080) & CBCR_OFF)) {
+		return 0;
+	}
+	uint32_t config = rd(raphael_te + 0x288);
+	if (!(rd(raphael_te + 0x284) & 1) || (config & (3u << 19)) != (3u << 19)) {
+		return 0;
+	}
+	/* DPU INTF_TEAR_INT_COUNT_VAL: low 16 bits are the read pointer; external TE resets it to INIT. */
+	*line = (rd(raphael_te + 0x298) - rd(raphael_te + 0x294)) & 0xffff;
+	return 1;
+}
+
+bool
+raphael_display_present(void)
+{
+	uint64_t began = mach_absolute_time(), ns;
+
+	/* The firmware's 0xffff TE height leaves its frame counter at zero. */
+	wr(raphael_irq + 8, 1u << 3);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	wr(raphael_mdp + 0x5014, 0x9c000000 + raphael_back * 0xa00000);
+	wr(raphael_mdp + 0x2018, 1); /* VIG0 flush bit, sde_hw_ctl.c:sspp_tbl. */
+	/* Linux also omits CTL_START while INTF autorefresh owns the kickoffs. */
+	if (!(rd(raphael_te + 0x2b4) & (1u << 31))) {
+		wr(raphael_mdp + 0x201c, 1);
+	}
+	for (;;) {
+		if ((rd(raphael_irq + 4) & (1u << 3)) && !(rd(raphael_mdp + 0x2018) & 1)) {
+			break;
+		}
+		absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
+		if (ns >= 50 * NSEC_PER_MSEC) {
+			printf("raphael-display: timeout count %#x flush %#x start %#x TE IRQ %#x/%#x output %#x line %#x\n",
+			    rd(raphael_te + 0x298), rd(raphael_mdp + 0x2018), rd(raphael_mdp + 0x201c),
+			    rd(raphael_mdp + 0x6e804), rd(raphael_mdp + 0x6e904),
+			    rd(raphael_te + 0x2ac), rd(raphael_te + 0x2b0));
+			printf("raphael-display: flip did not latch at TE, restoring boot framebuffer\n");
+			raphael_display_quiesce();
+			return false;
+		}
+		delay_for_interval(100, NSEC_PER_USEC);
+	}
+	raphael_front = raphael_back;
+	raphael_back = (raphael_back + 1) % 3;
+	loader_set_framebuffer(0x9c000000ull + raphael_front * 0xa00000ull);
+	static unsigned frames;
+	if (frames++ < 3) {
+		printf("raphael-display: flip %u latched, front %#llx flush %#x\n", frames,
+		    (unsigned long long)loader_framebuffer, rd(raphael_mdp + 0x2018));
+	}
+	return true;
+}
+
+void
+raphael_display_quiesce(void)
+{
+	if (!raphael_flipping) {
+		return;
+	}
+	if (raphael_front != 0) {
+		memcpy((void *)raphael_fb[0], (const void *)raphael_fb[raphael_front], raphael_fb_size);
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	wr(raphael_mdp + 0x5014, 0x9c000000);
+	wr(raphael_mdp + 0x2018, 1);
+	if (!(rd(raphael_te + 0x2b4) & (1u << 31))) {
+		wr(raphael_mdp + 0x201c, 1);
+	}
+	loader_set_framebuffer(0x9c000000);
+	raphael_flipping = false;
+}
 
 static void
 display_probe(void)

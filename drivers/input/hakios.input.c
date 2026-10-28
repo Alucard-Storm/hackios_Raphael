@@ -13,6 +13,27 @@
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
+
+int
+hakios_is_raphael(void)
+{
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess &&
+	    strcmp((const char *)prop, "raphael") == 0) {
+		return 1;
+	}
+	if (SecureDTLookupEntry(NULL, "/chosen", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "hackios,platform", &prop, &size) == kSuccess &&
+	    size >= 7 && memcmp(prop, "raphael", 7) == 0) {
+		return 1;
+	}
+	return 0;
+}
 
 #define TOUCH_QUEUE     512             /* records; a power of two */
 
