@@ -344,3 +344,11 @@ How it was found: Android's own I2C traffic to the amplifier recorded with ftrac
 addresses and the on/off sequence), the container decoded with the structures of its `tfa_container.h`, and the driver's
 start-up order. Reading the amplifier's registers from Android's sysfs while it was powered down hung that phone: do not.
 Test runs that you interact with need `PHONE_SECS` long enough (the run ends, and the phone leaves iOS, when it expires).
+
+## CPU Frequency Scaling
+
+**Status: SM8150 OSM dynamic frequency scaling is enabled** (`cpufreq=1` in `PHONE_ARGS`), ported from HeliumStudio-Dev's bring-up (https://github.com/HeliumStudio-Dev/hackios-xnu-kernel, branch `helium/raphael-bringup`, commit `d17aab6`).
+
+- Decodes the hardware frequency LUTs across the three OSM clusters: Silver (Cores 0-3 @ `0x18323000`), Gold (Cores 4-6 @ `0x18325800`), and Prime (Core 7 @ `0x18327800`).
+- Dynamically scales frequencies according to per-domain CPU load and boosts frequencies for 200 ms on touchscreen input (`hakios_cpufreq_boost()`).
+- Eliminates CPU overheating, allowing comfortable 5-minute sessions (`PHONE_SECS=300`).
