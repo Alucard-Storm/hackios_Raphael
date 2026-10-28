@@ -276,12 +276,12 @@ GL=1 SYSTEM=1 REST=1 userland/build.sh          # not PREBUILT=1: it compiles; t
 make phone DEVICE=raphael                       # with gpu=1 in PHONE_ARGS
 ```
 
-**Two workarounds and a trap.** (1) `glenv=FD_MESA_DEBUG=sysmem` (in `PHONE_ARGS`): with Mesa's default tiled (GMEM) rendering the home screen shows
-artifacts (rounded corners drawn as octagons, black boxes behind icon labels, thin lines), with plain rendering it does not and it feels
-smoother. Switching off LRZ, UBWC, fp16 or binning (`nolrz`, `noubwc`, `nofp16`, `nobin`) does not help, nor do the vendor's tiling-mode
-registers and graphics-memory range (now written, `adreno_tiling` chooses); only skipping the tiles does. The artifacts look like tiles that
-were loaded from memory as black and stored back over what was not redrawn: the tiled path's load is the suspect, not found yet.
-(2) The tearing ("a game without V-Sync") is the display side: nothing paces the GPU's drawing against the panel's scanout.
+**The artifacts, and a trap.** With Mesa's default tiled (GMEM) rendering the home screen first showed artifacts (rounded corners drawn as octagons, black boxes
+behind icon labels, thin lines); `glenv=FD_MESA_DEBUG=sysmem` (plain rendering) hid them. The cause was the `GMEM_BASE` parameter the kernel gives Mesa: 0,
+while the UCHE's graphics-memory range (step 20, the vendor's) starts at 0x100000; Mesa addresses the memory with it, so tiles were loaded and stored at the
+wrong place. It must match: 0x100000 for the 640 (found by comparing with HeliumStudio-Dev's raphael-bringup, which has the same tiling registers and says so
+in a comment). Switching off LRZ, UBWC, fp16 or binning did not help; the vendor's tiling-mode registers and range are written (`adreno_tiling` chooses).
+Screen tearing (a game without V-Sync) remains: nothing paces the GPU's drawing against the panel's scan-out.
 **The trap:** `gpu=1` used to skip steps 10 to 12 as on the POCO; started from a fresh boot (Android has just used the GPU and left its zap
 shader loaded in TrustZone) the first call of step 19 ("give up the zap shader") hung the phone, every time; runs started from the loader after a
 clean run did not. All the steps run now. One TrustZone call at a time (`hakios_scm_lock`) across the GPU, audio, Wi-Fi and modem drivers.

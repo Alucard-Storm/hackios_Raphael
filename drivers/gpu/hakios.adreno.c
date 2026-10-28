@@ -3636,12 +3636,16 @@ hakios_gpu_parameter(uint32_t which, uint64_t *value)
 {
 	switch (which) {
 	case 0x01:                              /* GPU_ID: none, the chip ID says it */
-	case 0x06:                              /* GMEM_BASE */
 	case 0x08:                              /* PP_PGTABLE */
 	case 0x09:                              /* FAULTS */
 	case 0x0a:                              /* SUSPENDS */
 	case 0x11:                              /* RAYTRACING */
 		*value = 0;
+		return true;
+	case 0x06:                              /* GMEM_BASE: must match the UCHE's range (step 20: 0x100000 for the 640's 1 MB). Mesa
+	                                         * addresses the graphics memory with it: at 0 the tiled path loaded and stored tiles
+	                                         * at the wrong place (black boxes, octagons). Found in HeliumStudio-Dev's raphael-bringup. */
+		*value = gpu_model == &gpu_models[1] ? 0x100000 : 0;
 		return true;
 	case 0x02:                              /* GMEM_SIZE: the 640's is 1 MB (the vendor's gpulist: "verified 1MB") */
 		*value = gpu_model == &gpu_models[1] ? 1024 * 1024 : 512 * 1024;
