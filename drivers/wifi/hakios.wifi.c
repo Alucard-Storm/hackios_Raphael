@@ -3677,25 +3677,48 @@ mpss_storage_prepare(void)
 		uint64_t size = 0;
 		const uint8_t *data = image_file(files[i], &size);
 		uint32_t expected = i == 3 ? 0x40000 : 0x800000;
-		if (!data || size != expected || !(rmtfs.files[i].data = kalloc_data(size, Z_WAITOK))) return false;
+		if (!data || size != expected || !(rmtfs.files[i].data = kalloc_data(size, Z_WAITOK))) {
+			printf("wifi: RMTFS: %s: %s (size %llu, wanted %u)\n", files[i], data ? "wrong size or no memory" : "not in the image", size, expected);
+			return false;
+		}
 		memcpy(rmtfs.files[i].data, data, size); rmtfs.files[i].size = (uint32_t)size;
 	}
 	/* The loader owns the static RAM image; this plain file reserves DMA pages below 4 GiB without borrowing firmware RAM. */
 	if (!pool || pool_bytes < RMTFS_BYTES + 3 * PAGE_SIZE || cached < (vm_offset_t)pool ||
-	    cached - (vm_offset_t)pool > pool_bytes - RMTFS_BYTES - PAGE_SIZE) return false;
+	    cached - (vm_offset_t)pool > pool_bytes - RMTFS_BYTES - PAGE_SIZE) {
+		printf("wifi: RMTFS: the pool file 0-rmtfs-ram is %llu bytes at %p: too small for %u bytes on a page\n", pool_bytes, pool, RMTFS_BYTES);
+		return false;
+	}
+	uint64_t given = 0;
+	if (PE_parse_boot_argn("rmtfs_pool_pa", &given, sizeof(given)) && given != 0) {
+		/* the loader's own memory (below 4 GiB, which the kernel's RAM is not): used as it is */
+		rmtfs.physical = given;
+		if (rmtfs.physical > UINT32_MAX - RMTFS_BYTES || (rmtfs.physical & PAGE_MASK)) {
+			printf("wifi: RMTFS: the loader's pool %#llx is not below 4 GiB or not on a page\n", (uint64_t)rmtfs.physical);
+			return false;
+		}
+		goto have_pool;
+	}
 	rmtfs.physical = kvtophys(cached);
-	if (rmtfs.physical > UINT32_MAX - RMTFS_BYTES || (rmtfs.physical & PAGE_MASK)) return false;
+	if (rmtfs.physical > UINT32_MAX - RMTFS_BYTES || (rmtfs.physical & PAGE_MASK)) {
+		printf("wifi: RMTFS: the pool is at physical %#llx: not below 4 GiB, or not on a page\n", (uint64_t)rmtfs.physical);
+		return false;
+	}
 	for (vm_offset_t offset = 0; offset < RMTFS_BYTES; offset += PAGE_SIZE) {
-		if (kvtophys(cached + offset) != rmtfs.physical + offset) return false;
+		if (kvtophys(cached + offset) != rmtfs.physical + offset) {
+			printf("wifi: RMTFS: the pool is not in one piece of physical memory (broken at +%#lx): the file was copied, not read in place\n", (unsigned long)offset);
+			return false;
+		}
 	}
 	for (vm_offset_t at = cached; at < cached + RMTFS_BYTES; at += 64) __asm__ volatile ("dc civac, %0" : : "r" (at));
 	settle();
+have_pool:
 	rmtfs.memory = ml_io_map_unmappable(rmtfs.physical, RMTFS_BYTES, VM_WIMG_WCOMB);
-	if (!rmtfs.memory) return false;
+	if (!rmtfs.memory) { printf("wifi: RMTFS: the pool could not be mapped\n"); return false; }
 	bzero((void *)rmtfs.memory, RMTFS_BYTES);
 	settle();
 	printf("wifi: RMTFS reserved RAM: physical %#llx, %u bytes; grant before MPSS start\n", rmtfs.physical, RMTFS_BYTES);
-	if (!mpss_storage_permission(true)) return false;
+	if (!mpss_storage_permission(true)) { printf("wifi: RMTFS: TrustZone refused the pool's permissions\n"); return false; }
 	rmtfs.granted = true;
 	return true;
 }

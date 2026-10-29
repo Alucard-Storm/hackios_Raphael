@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hakios.wifi</string>
+	<!-- The Redmi K20 Pro's version of the job (build.sh picks it for DEVICE=raphael): after the radio's interface is
+	     configured it waits for you to join a network in Settings, then says the address, and whether a name resolves,
+	     a TCP connection opens and an HTTPS page comes, so that a join that does not finish says where it stopped.
+	     with wifi=1 among the kernel's arguments: has configd configure the radio's interface (src/net_test.m,
+	     "wifi"); without, it ends at once -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/redwood/bin/net_test</string>
+		<string>wifi</string>
+		<string>waitaddr</string>
+		<string>en0</string>
+		<string>400</string>
+		<string>show</string>
+		<string>resolve</string>
+		<string>example.com</string>
+		<string>tcp</string>
+		<string>example.com</string>
+		<string>80</string>
+		<string>fetch</string>
+		<string>https://www.apple.com/library/test/success.html</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
+</dict>
+</plist>

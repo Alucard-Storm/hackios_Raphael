@@ -463,6 +463,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
+	[ "${DEVICE:-}" = raphael ] && cp com.hakios.wifi.raphael.plist root/LaunchDaemons/com.hakios.wifi.plist
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
@@ -696,7 +697,7 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# This stages the files; a separate XNU MPSS driver is still required to start the modem.
 	if [ -n "$MODEM" ]; then
 		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
-		../devices/redwood/tools/modem_firmware.py --dtb ../devices/redwood/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
+		../devices/redwood/tools/modem_firmware.py --dtb ../devices/${DEVICE:-redwood}/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
 			--node /soc/qcom,mss@4080000 >/dev/null
 		mkdir -p sysroot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/
@@ -705,6 +706,21 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		if [ -d ../fw-modem/image ]; then
 			rm -rf sysroot/fw/image && cp -R ../fw-modem/image sysroot/fw/image
 		fi
+	fi
+	# The Redmi K20 Pro's Wi-Fi chip (ath10k, WCN3990) is inside the modem: besides the modem firmware above (MODEM=1) the
+	# kernel needs the Wi-Fi firmware the modem runs, its board data, and the modem's own non-volatile files, which the
+	# modem asks for at start over the RMTFS service (drivers/wifi/hakios.wifi.c). The non-volatile snapshots are this
+	# phone's own (they hold its identity): they go into this image, which stays on your PC and in your phone's RAM
+	# and its own image file, and never into one that is shared.
+	if [ -n "$MPSS_WIFI" ]; then
+		[ -z "$SHARE" ] || { echo "build.sh: MPSS_WIFI is this phone's private data; SHARE is refused" >&2; exit 1; }
+		[ -n "$MODEM" ] || { echo "build.sh: MPSS_WIFI=1 needs MODEM=1 as well" >&2; exit 1; }
+		for f in wlanmdsp.mbn nv-modemst1 nv-modemst2 nv-fsg nv-fsc firmware-5.bin 0-rmtfs-ram bd_f11gl.bin bd_f11cn.bin; do
+			[ -f ../fw-wifi/$f ] || { echo "build.sh: MPSS_WIFI=1 needs ../fw-wifi/$f (devices/raphael/pull-firmware.sh)" >&2; exit 1; }
+		done
+		mkdir -p sysroot/fw
+		install -m 0644 ../fw-wifi/wlanmdsp.mbn ../fw-wifi/firmware-5.bin ../fw-wifi/0-rmtfs-ram ../fw-wifi/bd_f11gl.bin ../fw-wifi/bd_f11cn.bin sysroot/fw/
+		install -m 0600 ../fw-wifi/nv-modemst1 ../fw-wifi/nv-modemst2 ../fw-wifi/nv-fsg ../fw-wifi/nv-fsc sysroot/fw/
 	fi
 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (drivers/audio/hakios.speaker.c,
 	# for sound=3): Android's own register values, which are not in the repository either

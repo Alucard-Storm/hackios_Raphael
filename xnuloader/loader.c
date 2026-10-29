@@ -1641,6 +1641,12 @@ _Static_assert(__builtin_offsetof(struct loader_block, ask) == 128,
 
 /* (8 KB is as far as this target aligns; the kernel maps whole 16 KB pages around both) */
 static struct loader_block block_shared __attribute__((aligned(0x2000)));
+/*
+ * The memory the modem's remote file service (RMTFS) is given on the Redmi K20 Pro, for the Wi-Fi: the modem
+ * addresses it with 32 bits, so it has to lie below 4 GiB, which the RAM the kernel gets (a bank above that)
+ * does not. This loader's own image is below, and the kernel is handed the address (rmtfs_pool_pa=).
+ */
+static uint8_t rmtfs_pool[0x410000] __attribute__((aligned(0x2000)));      /* 0x10000 more: its address is aligned to that when it is given */
 static void block_io2_probe(efi_handle h, efi_block_io *bio);
 static int block_probe_requested;       /* ufs_probe=1: block_io2_probe() at block_start() */
 static efi_block_io *block_bios[BLOCK_MAX_PARTS];
@@ -3678,7 +3684,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* "bootcpu=N" among the kernel's arguments: run it on core N (see run_on_other_cpu) */
 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
-	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
+	int more_cores = 0, battery_requested = 0, ufs_requested = 0, wifi_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (drivers/camera/hakios.torch.c) */
 	int torch_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is Darwin's (drivers/camera/hakios.camera.c) */
@@ -3701,6 +3707,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
+		wifi_requested |= (starts_with(c, "wifi=") || starts_with(c, "wifi_step=")) && (c == pi.cmdline || c[-1] == ' ');
 		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
 		    (c[9] == 0 || c[9] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
@@ -3873,6 +3880,20 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			print("WARNING: hakios_kver= does not fit in the kernel command line (%d of %d used)\n", (uint64_t)before,
 			    (uint64_t)(BOOT_LINE_LENGTH - 1));
 		}
+	}
+	if (wifi_requested && PLAT == &platform_raphael) {
+		/* the modem's file service needs memory below 4 GiB, which the kernel's RAM is not (see rmtfs_pool) */
+		static const char prefix[] = "rmtfs_pool_pa=0x";
+		static const char hex[] = "0123456789abcdef";
+		uint64_t address = ((uint64_t)(uintptr_t)rmtfs_pool + 0xffff) & ~0xffffULL;
+
+		for (const char *c = prefix; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+			ba->commandLine[n++] = *c;
+		}
+		for (int shift = 60; shift >= 0 && n < BOOT_LINE_LENGTH - 1; shift -= 4) {
+			ba->commandLine[n++] = hex[(address >> shift) & 0xf];
+		}
+		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
 	/*
 	 * The payload's own command line, last. The kernel's boot_args holds BOOT_LINE_LENGTH characters and the
