@@ -51,7 +51,15 @@
 #define STORE_AT        8589934592LL            /* darwin's block 2097152: past the cryptexes, with room to spare */
 #define SLOT_BYTES      0x80000000LL            /* 2 GiB a slot, two slots */
 #define SLOTS           2
-#define DEVICE          "/dev/rufs_darwin"
+/*
+ * Where the store is: by default darwin, from STORE_AT on. With var_store_dev=NAME among the kernel's
+ * arguments it is /dev/rufs_NAME instead, from its first block: the image file the loader serves
+ * as a partition of its own ("xl img": a pinned file inside Android's /data, which leaves
+ * Android as it was) has nothing of the iOS image or the cryptexes in front of the store.
+ */
+static char store_path[64] = "/dev/rufs_darwin";
+#define DEVICE          store_path
+static off_t store_at = STORE_AT;
 #define ROOT            "/private/var"
 #define MAX_PATH        1024
 #define MAX_DEPTH       32
@@ -112,6 +120,41 @@ struct entry {
 #define VAR_SAVE_IDLE   1
 #define VAR_SAVE_WANTED 2
 #define VAR_SAVE_DONE   3
+
+/* NAME's value among the kernel's arguments, up to a space; 0 when it is not there */
+static int
+boot_arg_value(const char *name, char *out, size_t size)
+{
+	static char args[1024];
+	size_t len = sizeof(args) - 1, n = strlen(name);
+
+	if (sysctlbyname("kern.bootargs", args, &len, NULL, 0) != 0) {
+		return 0;
+	}
+	args[len < sizeof(args) ? len : sizeof(args) - 1] = 0;
+	for (char *p = args; *p;) {
+		while (*p == ' ') {
+			p++;
+		}
+		if (strncmp(p, name, n) == 0 && p[n] == '=') {
+			size_t v = 0;
+
+			while (p[n + 1 + v] != 0 && p[n + 1 + v] != ' ') {
+				v++;
+			}
+			if (v == 0 || v >= size) {
+				return 0;
+			}
+			memcpy(out, p + n + 1, v);
+			out[v] = 0;
+			return 1;
+		}
+		while (*p && *p != ' ') {
+			p++;
+		}
+	}
+	return 0;
+}
 
 /* Is NAME=VALUE among the kernel's arguments? (as init.c reads them) */
 static int
@@ -236,7 +279,7 @@ static uint64_t entries;
 static off_t
 slot_at(int slot)
 {
-	return STORE_AT + (off_t)slot * SLOT_BYTES;
+	return store_at + (off_t)slot * SLOT_BYTES;
 }
 
 static int
@@ -1362,6 +1405,15 @@ main(int argc, char **argv, char **envp)
 
 	(void)envp;
 	crc_init();
+	{
+		char name[40];
+
+		if (boot_arg_value("var_store_dev", name, sizeof(name))) {
+			memcpy(store_path, "/dev/rufs_", 11);
+			memcpy(store_path + 10, name, strlen(name) + 1);
+			store_at = 0;
+		}
+	}
 	if (strcmp(what, "stamp") == 0) {
 		return stamp(argc > 2 ? argv[2] : "/private/var/hakios-stamp") ? 0 : 1;
 	}
