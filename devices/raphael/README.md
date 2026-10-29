@@ -1,6 +1,6 @@
 # Device: Redmi K20 Pro (raphael)
 
-**Status: iOS 16.5 boots from RAM to the home screen on this phone, with touch and battery readout.** Nothing is
+**Status: iOS 16.5 boots from RAM to the home screen on this phone, with touch, buttons, vibration, sound, the GPU, tear-free scanout, CPU frequency scaling and battery readout.** Nothing is
 flashed; the phone goes back to Android after a restart. The first phone, `devices/poco-x5-pro/`, is the
 worked example. The sections below are the notes in the order they were found.
 
@@ -9,14 +9,17 @@ worked example. The sections below are the notes in the order they were found.
 | UEFI (Mu-Silicium, `uefi/`) | works: USB and display |
 | XNU loader (`platform_raphael`) | works, also the UFS and charger polls |
 | Kernel | boots to user space; the SM8150 virtual timer is INTID 19 (`vtimer-intid` in the device tree) |
-| iOS 16.5 | home screen, software drawing |
+| iOS 16.5 | home screen; the window server draws with the GPU (`gpu=1`) |
 | Touch | works (`touchscreen=2`, Goodix GT9886 on I2C) |
 | Buttons | power, volume up and down read and delivered (on with `touchscreen=`, or `buttons=1`); polled over SPMI, no interrupts |
 | Vibration | works (`haptic=5`): the PM8150B's haptics block, an ERM motor, driven by iOS's actuator waveforms as taps and vibrations |
 | Sound (`adsp=1 sound=4`) | works: iOS's sounds play through the bottom speaker (the audio DSP, MI2S, a TFA9874 amplifier); earpiece, microphones, headphones not done |
 | Battery | SOC, voltage and charging state read (`battery=1`); temperature and current words not confirmed |
-| GPU (Adreno 640) | all 22 bring-up steps pass: the core is powered, runs commands and fills a picture the panel shows; iOS does not use it yet (Mesa, `libhakios.gpu`) |
-| Wi-Fi, cellular, sound, haptics, cameras | not started (the Wi-Fi chip lives inside the modem) |
+| GPU (Adreno 640) | works in iOS (`gpu=1`): Mesa 25.0.7 FD640, tiled rendering clean with `GMEM_BASE 0x100000`; one SMMU fault at teardown (addr 0x1600) unexplained |
+| Display | tear-free: command-mode DSI with TE scanout and page flips (`fb_scan=1`) |
+| CPU frequency | OSM scaling with touch boost (`cpufreq=1`) |
+| Wi-Fi, cellular, earpiece, microphones, headphones, cameras | not done (the Wi-Fi chip lives inside the modem; an unstable ath10k attempt is on branch `backup-wifi-commits`) |
+| Persistence | none: the image lives in RAM and is uploaded every run (~90 s, 2.4 GB); booting from `userdata` is a deferred idea |
 
 ## Quick start
 
@@ -34,7 +37,11 @@ tools/logdump.sh                                # after rebooting to Android: th
 ## Traps
 
 - No `-v`: the screen shows the Silicium logo for the whole run; that is normal. Do not hold Power.
-- Keep runs short (`PHONE_SECS=180`): there is no thermal control yet.
+- Keep runs short: there is no thermal control yet (`PHONE_SECS=300` in `run.conf`).
+- Build the image with exactly `GL=1 SYSTEM=1 REST=1 userland/build.sh` (not `PREBUILT=1`, no custom `RC_JOBS`). `devices/raphael/raphael.jobs` is a hardware-test job list: an image built with it boots without wallpaper, buttons or sound.
+- Never start a run while the previous one is on the phone; a premature launch leaves the loader refusing uploads ("no memory window") until `xl reboot`.
+- A run from a fresh boot differs from one from the loader (Android leaves the GPU zap shader loaded in TrustZone).
+- The loader no longer writes the `logdump` partition on raphael (`persist_logs`, commit `cb540f1`), so a hung run loses its log.
 - A watched run needs `hv_wdt_pet=1 bootcpu=7 cpus=8` (`run.conf` has them); with `cpus=1` the loader sees no heartbeat.
 - The system image is lost when the phone restarts: upload it again (`make phone` does).
 - An interrupted `xl run` leaves a process that blocks `xl`: `pgrep -f '^/bin/bash \./xl '`, kill it (not `pkill -f "xl run"`, that kills your own shell).
@@ -352,3 +359,11 @@ Test runs that you interact with need `PHONE_SECS` long enough (the run ends, an
 - Decodes the hardware frequency LUTs across the three OSM clusters: Silver (Cores 0-3 @ `0x18323000`), Gold (Cores 4-6 @ `0x18325800`), and Prime (Core 7 @ `0x18327800`).
 - Dynamically scales frequencies according to per-domain CPU load and boosts frequencies for 200 ms on touchscreen input (`hakios_cpufreq_boost()`).
 - Eliminates CPU overheating, allowing comfortable 5-minute sessions (`PHONE_SECS=300`).
+
+## Cross-checked against HeliumStudio-Dev's raphael-bringup (2026-10-29)
+
+Picked: a store barrier before an inter-processor interrupt (`gic_send_sgi`), the virtual timer masked
+when the kernel hands back to the loader, `xl` ignoring an empty `result:` answer. Already ours: touch
+RX FIFO drain, touch boost for cpufreq, GMEM base. Not taken: their second touch driver
+(`raphael_touch.c`), the `userdata` write path in `hakios.ufs.c` (persistence, deferred), Wi-Fi.
+Verified on the phone with `make phone`: ~980 s, no panic, wallpaper, buttons, sound, vibration, no tearing.
