@@ -378,6 +378,18 @@ hang) enter && fb oem hang; echo "xl: waiting for the watchdog..."; t0=$(date +%
 reboot) not_anothers_run reboot && fb reboot ;;
 reload) [ "$(state)" = loader ] && { fb reboot >/dev/null; wait_for android 120; }; enter && echo "xl: loader is up" ;;
 touch) enter && FB_TIMEOUT=$(( ${2:-20} + 20 )) fb oem touch ${2:-20} | tail -1 && fb oem log >/dev/null && fetch_log logs/loader.log && grep -a 'touch:' logs/loader.log ;;
+parts) enter && fb oem parts ${2:-} >/dev/null && fb oem log >/dev/null && fetch_log logs/loader.log && grep -a '^parts:' logs/loader.log | awk '!seen[$0]++' | grep -a -- "${2:-}" ;;
+store) # store <name> <window-lo> <window-hi> | clear: pin a partition at the loader as it is now, and the blocks of it a run may write
+	enter || exit 1
+	if [ "$2" = clear ]; then fb oem store clear; exit; fi
+	[ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] || { echo "usage: xl store <name> <window-lo-hex> <window-hi-hex> | xl store clear" >&2; exit 1; }
+	fb oem parts "$2" >/dev/null && fb oem log >/dev/null && fetch_log logs/loader.log || exit 1
+	line=$(grep -a "^parts: $2 unit=0 " logs/loader.log | awk '!seen[$0]++')
+	[ "$(printf '%s\n' "$line" | grep -c .)" = 1 ] || { echo "xl: '$2' is not exactly one partition on unit 0:" >&2; grep -a "^parts: $2 " logs/loader.log >&2; exit 1; }
+	uniq=${line##*uniq=}; lba=${line#* lba=}; lba=${lba%% *}
+	echo "xl: pinning $line" >&2
+	fb oem store "$2" "$uniq" "${lba%%..*}" "${lba##*..}" "$3" "$4"
+	;;
 state) state ;;
 *) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0" ;;
 esac

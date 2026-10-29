@@ -1595,6 +1595,7 @@ struct loader_block {
 	uint32_t write_part_plus_one;
 	uint32_t write_caps;                   /* BLOCK_CAN_FAST; zero from a loader before it, which a kernel reads as none */
 	uint64_t write_first;
+	uint64_t write_end;            /* the window's end, in the partition's blocks (0: an older loader: to the partition's end) */
 	/* written by the kernel: what it wants, then request is advanced */
 	struct {
 		volatile uint32_t request;
@@ -1645,6 +1646,22 @@ static efi_block_io *block_bios[BLOCK_MAX_PARTS];
 static int block_enabled;
 static int block_write_requested;       /* ufs_write=1 on the command line */
 static int block_write_part = -1;       /* the only partition a write may reach; -1: none, writes refused */
+static uint64_t block_write_lo, block_write_hi; /* the blocks of it a write may reach: [lo, hi) */
+/* The identity of every partition UEFI listed, for "oem parts" and for the store grant */
+static struct { efi_guid type, uniq; uint64_t end_lba; } block_ids[BLOCK_MAX_PARTS];
+static uint32_t block_id_count;
+/*
+ * "oem store": the one partition (other than darwin, whose identity is built in) that may take
+ * writes, as the host read it from "oem parts" and pinned it, with the window of it that may be
+ * written. It lives as long as this loader does; a run still has to ask for ufs_write=1.
+ */
+static struct {
+	int set;
+	char name[36];
+	efi_guid uniq;
+	uint64_t first, last;          /* its first and last LBA of unit 0 */
+	uint64_t window_lo, window_hi; /* in the partition's blocks */
+} store_grant;
 static uint64_t block_writes, block_writes_refused, block_write_bytes;
 
 /* the bytes of a device path before its end node */
@@ -1897,38 +1914,93 @@ block_tables(void)
  * is already in bp->name (ufs_name), in ASCII.
  */
 static int
-block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
+block_is_store(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
 {
-	static const efi_guid type = BLOCK_DARWIN_TYPE;
-	const uint8_t *u = (const uint8_t *)&info->unique_guid;
-	static const char name[] = "darwin";
+	static const efi_guid darwin_type = BLOCK_DARWIN_TYPE, darwin_uniq = BLOCK_DARWIN_UNIQ;
+	const int granted = store_grant.set;
+	const char *name = granted ? store_grant.name : "darwin";
+	const efi_guid *uniq = granted ? &store_grant.uniq : &darwin_uniq;
+	uint64_t first = granted ? store_grant.first : BLOCK_DARWIN_FIRST;
+	uint64_t last = granted ? store_grant.last : BLOCK_DARWIN_LAST;
 	const char *why = NULL;
 
-	for (unsigned i = 0; i < sizeof(name); i++) {
+	for (unsigned i = 0; i <= str_len(name); i++) {
 		if (bp->name[i] != name[i]) {
 			return 0;               /* another partition: nothing to say about it */
 		}
 	}
-	if (memcmp(&info->type_guid, &type, sizeof(type)) != 0) {
+	if (!granted && memcmp(&info->type_guid, &darwin_type, sizeof(darwin_type)) != 0) {
 		why = "its type GUID is not the one it had";
+	} else if (memcmp(&info->unique_guid, uniq, sizeof(*uniq)) != 0) {
+		why = "its unique GUID is not the one it had";
+	} else if (info->start_lba != first || info->end_lba != last) {
+		why = "it does not begin and end where it did";
 	} else if (bp->unit != 0) {
 		/* the first unit UEFI lists: this firmware's device paths say no logical unit number
 		 * (device_path_print finds no 3.19 node), so bp->lun is 0xff for every unit */
 		why = "it is not on the first logical unit";
-	} else if (bp->block_size != 4096 || bp->blocks < BLOCK_DARWIN_MIN ||
-	    info->end_lba - info->start_lba + 1 != bp->blocks) {
-		why = "it is not 20 GiB in blocks of 4096";
+	} else if (bp->block_size != 4096 || bp->blocks != last - first + 1) {
+		why = "its blocks are not what they were";
 	} else if (bio->media->read_only) {
 		why = "UEFI gives it out read only";
+	} else if (granted && (store_grant.window_lo == 0 || store_grant.window_lo >= store_grant.window_hi ||
+	    store_grant.window_hi > bp->blocks)) {
+		why = "the window granted is not inside it";
 	}
 	if (why != NULL) {
-		print("ufs: darwin: no write will be served: %s\n", why);
+		print("ufs: %s: no write will be served: %s\n", name, why);
 		return 0;
 	}
-	print("ufs: darwin (LBA %d..%d of unit 0, unique GUID %x...%x): its blocks from %d on may be written this run\n",
-	    info->start_lba, info->end_lba, (uint64_t)u[3] << 24 | (uint64_t)u[2] << 16 | (uint64_t)u[1] << 8 | u[0],
-	    (uint64_t)u[12] << 24 | (uint64_t)u[13] << 16 | (uint64_t)u[14] << 8 | u[15], BLOCK_WRITE_FIRST);
+	block_write_lo = granted ? store_grant.window_lo : BLOCK_WRITE_FIRST;
+	block_write_hi = granted ? store_grant.window_hi : bp->blocks;
+	print("ufs: %s (LBA %d..%d of unit 0): its blocks %d..%d may be written this run\n", name,
+	    info->start_lba, info->end_lba, block_write_lo, block_write_hi);
 	return 1;
+}
+
+static void
+guid_text(const efi_guid *g, char *out)
+{
+	static const char hex[] = "0123456789abcdef";
+	uint8_t raw[16];
+	unsigned n = 0;
+
+	for (int i = 0; i < 4; i++) raw[i] = (uint8_t)(g->a >> (24 - 8 * i));
+	raw[4] = (uint8_t)(g->b >> 8); raw[5] = (uint8_t)g->b;
+	raw[6] = (uint8_t)(g->c >> 8); raw[7] = (uint8_t)g->c;
+	for (int i = 0; i < 8; i++) raw[8 + i] = g->d[i];
+	for (unsigned i = 0; i < 16; i++) {
+		if (i == 4 || i == 6 || i == 8 || i == 10) out[n++] = '-';
+		out[n++] = hex[raw[i] >> 4];
+		out[n++] = hex[raw[i] & 15];
+	}
+	out[n] = 0;
+}
+
+/* The text form guid_text() makes (8-4-4-4-12 hex digits); 0 when it is that, -1 when not */
+static int
+guid_parse(const char *t, efi_guid *g)
+{
+	uint8_t raw[16];
+	unsigned n = 0;
+
+	for (unsigned i = 0; i < 36; i++) {
+		if (i == 8 || i == 13 || i == 18 || i == 23) {
+			if (t[i] != '-') return -1;
+			continue;
+		}
+		int d = t[i] >= '0' && t[i] <= '9' ? t[i] - '0' : t[i] >= 'a' && t[i] <= 'f' ? t[i] - 'a' + 10 :
+		    t[i] >= 'A' && t[i] <= 'F' ? t[i] - 'A' + 10 : -1;
+		if (d < 0) return -1;
+		if ((n & 1) == 0) raw[n >> 1] = (uint8_t)(d << 4); else raw[n >> 1] |= (uint8_t)d;
+		n++;
+	}
+	if (t[36] != 0 && t[36] != ' ') return -1;
+	g->a = (uint32_t)raw[0] << 24 | (uint32_t)raw[1] << 16 | (uint32_t)raw[2] << 8 | raw[3];
+	g->b = (uint16_t)(raw[4] << 8 | raw[5]);
+	g->c = (uint16_t)(raw[6] << 8 | raw[7]);
+	for (int i = 0; i < 8; i++) g->d[i] = raw[8 + i];
+	return 0;
 }
 
 static void
@@ -2003,9 +2075,12 @@ block_start(void)
 				}
 			}
 		}
-		if (block_write_requested && block_is_darwin(info, bio, bp)) {
+		if (block_write_requested && block_is_store(info, bio, bp)) {
 			block_write_part = (int)block_shared.parts;
 		}
+		block_ids[block_shared.parts].type = info->type_guid;
+		block_ids[block_shared.parts].uniq = info->unique_guid;
+		block_ids[block_shared.parts].end_lba = info->end_lba;
 		block_bios[block_shared.parts++] = bio;
 		if (block_probe_requested && bp->name[0] == 'd' && bp->name[1] == 'a' && bp->name[2] == 'r' &&
 		    bp->name[3] == 'w' && bp->name[4] == 'i' && bp->name[5] == 'n' && bp->name[6] == 0) {
@@ -2013,6 +2088,7 @@ block_start(void)
 		}
 	}
 	BS->free_pool(handles);
+	block_id_count = block_shared.parts;
 	for (uint64_t u = 0; u < nunits; u++) {
 		struct loader_block_part *bp = &block_shared.part[block_shared.parts];
 		char *n = bp->name;
@@ -2053,7 +2129,8 @@ block_start(void)
 	block_writes = block_writes_refused = block_write_bytes = 0;
 	if (block_write_part >= 0) {
 		block_shared.write_part_plus_one = (uint32_t)block_write_part + 1;
-		block_shared.write_first = BLOCK_WRITE_FIRST;
+		block_shared.write_first = block_write_lo;
+		block_shared.write_end = block_write_hi;
 		block_shared.write_caps = BLOCK_CAN_FAST;
 	}
 	block_shared.magic = BLOCK_MAGIC;
@@ -2181,7 +2258,8 @@ block_poll(void)
 			s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
 			bytes = 0;
 		} else if (op == BLOCK_OP_WRITE || op == BLOCK_OP_WRITE_FAST || op == BLOCK_OP_FLUSH) {
-			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < BLOCK_WRITE_FIRST) {
+			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < block_write_lo ||
+			    lba >= block_write_hi || count > block_write_hi - lba) {
 				/* not darwin, or not past what the build writes from the computer: never */
 				if (block_writes_refused++ < 8) {
 					print("ufs: a write of %d blocks from %d of %s: REFUSED\n", count, lba,
@@ -4222,7 +4300,7 @@ fb_command(char *cmd)
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
 		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
-		    starts_with(cmd, "oem touch"))) {
+		    starts_with(cmd, "oem touch") || starts_with(cmd, "oem parts") || starts_with(cmd, "oem store"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
@@ -4249,6 +4327,67 @@ fb_command(char *cmd)
 				log_len = mark;
 			} else {
 				fb_reply("OKAY", "");
+			}
+		} else if (starts_with(cmd, "oem parts")) {
+			/* read only: the partitions UEFI lists, with the identity "oem store" pins, into the log; a name
+			 * after the command lists that one only (all of them take half the log: ask for all once) */
+			const char *only = cmd + 9;
+
+			while (*only == ' ') only++;
+			if (block_shared.magic != BLOCK_MAGIC) {
+				block_start();
+			}
+			for (uint32_t i = 0; i < block_id_count; i++) {
+				const struct loader_block_part *bp = &block_shared.part[i];
+				char t[40], u[40];
+
+				if (*only && !str_eq(only, bp->name)) {
+					continue;
+				}
+
+				guid_text(&block_ids[i].type, t);
+				guid_text(&block_ids[i].uniq, u);
+				print("parts: %s unit=%d lba=%x..%x blocks=%x bs=%d type=%s uniq=%s\n", bp->name,
+				    (uint64_t)bp->unit, bp->start_lba, block_ids[i].end_lba, bp->blocks,
+				    (uint64_t)bp->block_size, t, u);
+			}
+			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem store")) {
+			/* oem store clear | oem store <name> <unique-guid> <first-lba> <last-lba> <window-lo> <window-hi>
+			 * (LBAs and the window, which is in the partition's own blocks, in hex) */
+			const char *a = cmd + 9;
+
+			while (*a == ' ') a++;
+			if (str_eq(a, "clear")) {
+				memset(&store_grant, 0, sizeof(store_grant));
+				fb_reply("OKAY", "grant cleared");
+			} else {
+				unsigned n = 0;
+				const char *f[6];
+
+				while (*a && n < 6) {
+					f[n++] = a;
+					while (*a && *a != ' ') a++;
+					while (*a == ' ') a++;
+				}
+				unsigned len = n > 0 ? 0 : 36;
+				while (n > 0 && f[0][len] && f[0][len] != ' ') len++;
+				if (n != 6 || *a || len == 0 || len >= sizeof(store_grant.name) || guid_parse(f[1], &store_grant.uniq) != 0) {
+					memset(&store_grant, 0, sizeof(store_grant));
+					fb_reply("FAIL", "usage: store name guid first last window-lo window-hi | clear");
+				} else {
+					for (unsigned i = 0; i < len; i++) store_grant.name[i] = f[0][i];
+					store_grant.name[len] = 0;
+					store_grant.first = parse_number(f[2], 16);
+					store_grant.last = parse_number(f[3], 16);
+					store_grant.window_lo = parse_number(f[4], 16);
+					store_grant.window_hi = parse_number(f[5], 16);
+					store_grant.set = 1;
+					print("ufs: store grant: %s, LBA %x..%x, blocks %x..%x, for the runs of this loader\n",
+					    store_grant.name, store_grant.first, store_grant.last, store_grant.window_lo,
+					    store_grant.window_hi);
+					fb_reply("OKAY", "granted; the run still needs ufs_write=1");
+				}
 			}
 		} else if (starts_with(cmd, "oem ramdisk")) {
 			/* "oem ramdisk": the next download is a root image for the resident area; "oem ramdisk none" drops it */
