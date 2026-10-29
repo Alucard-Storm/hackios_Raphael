@@ -2,9 +2,15 @@
 # Build XNU for redwood on Linux. Extra make args are passed through.
 source "$(dirname "${BASH_SOURCE[0]}")/xnu-env.sh"
 cd "$XNU_SRC" || exit 1
-# The Wi-Fi driver's object (tools/mk-ath11k.sh) is linked into the kernel when it is there; make
+# The Wi-Fi driver's object (tools/mk-ath10k.py / tools/mk-ath11k.sh) is linked into the kernel when it is there; make
 # does not see it change, so the linked kernel is thrown away when it has.
-LX=$XNUDEPS/build/ath11k/out/ath11k.o
+if [ -n "${WIFI_OBJECT:-}" ]; then
+	LX="$WIFI_OBJECT"
+elif [ -f "$XNUDEPS/build/ath10k/out/ath10k.o" ]; then
+	LX="$XNUDEPS/build/ath10k/out/ath10k.o"
+else
+	LX="$XNUDEPS/build/ath11k/out/ath11k.o"
+fi
 # ... only into a kernel that has the Wi-Fi driver (CONFIG_HAKIOS_WIFI): the object's calls are answered by hakios.lx.c
 if [ -f config/MASTER.hakios ] && ! grep -q '^#  HAKIOS_DRIVERS = \[.* hakios_wifi ' config/MASTER.hakios; then LX=/nonexistent; fi
 STAMP=BUILD/obj/hakios-objects
@@ -24,6 +30,7 @@ if [ -d BUILD/obj ] && [ "$(cat $STAMP 2>/dev/null)" != "$now" ]; then
 	rm -f BUILD/obj/*/mach.*.unstripped
 	echo "$now" > $STAMP
 fi
-exec make HAKIOS_OBJECTS="$LX" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-BCM2837} KERNEL_CONFIGS=DEVELOPMENT \
+# Produce the bootable Mach-O; Apple's extra KDK symbol sets require unimplemented DriverKit RPCs.
+exec make .DEFAULT_GOAL=build HAKIOS_OBJECTS="$LX" SDKROOT=iphoneos ARCH_CONFIGS=ARM64 MACHINE_CONFIGS=${MACHINE:-BCM2837} KERNEL_CONFIGS=DEVELOPMENT \
   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 BUILD_WERROR=0 BUILD_LTO=0 DO_CTFMERGE=0 \
   HOST_CC="$HOSTCC" HOST_FLEX=flex HOST_BISON=bison HOST_GM4=m4 CC=xnu-clang CXX=xnu-clang++ LOGCOLORS=n "$@"
