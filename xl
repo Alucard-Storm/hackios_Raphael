@@ -390,6 +390,25 @@ store) # store <name> <window-lo> <window-hi> | clear: pin a partition at the lo
 	echo "xl: pinning $line" >&2
 	fb oem store "$2" "$uniq" "${lba%%..*}" "${lba##*..}" "$3" "$4"
 	;;
+imgscan) # imgscan <path on the phone> <file>: where a pinned image file's blocks are (tools/android/hakios-img), from Android
+	[ -n "$2" ] && [ -n "$3" ] || { echo "usage: xl imgscan <path on the phone> <extents file>" >&2; exit 1; }
+	[ "$(state)" = android ] || { echo "xl: the phone has to be in Android (xl reboot)" >&2; exit 1; }
+	adb shell "su -c '/data/local/tmp/hakios-img extents $2'" | tr -d '\r' | grep -E '^[0-9]+ [0-9]+ [0-9]+ ' > "$3" && echo "xl: $(wc -l < "$3") extents in $3" ;;
+img) # img <name> <extents file> [backing partition]: show the file to the loader as a partition of its own (the extents are pinned with the identity of the backing partition as it is now)
+	[ -n "$2" ] && [ -s "$3" ] || { echo "usage: xl img <name> <extents file> [backing]" >&2; exit 1; }
+	back=${4:-userdata}
+	enter || exit 1
+	fb oem parts "$back" >/dev/null && fb oem log >/dev/null && fetch_log logs/loader.log || exit 1
+	line=$(grep -a "^parts: $back unit=0 " logs/loader.log | awk '!seen[$0]++')
+	[ "$(printf '%s\n' "$line" | grep -c .)" = 1 ] || { echo "xl: '$back' is not exactly one partition on unit 0" >&2; exit 1; }
+	uniq=${line##*uniq=}; lba=${line#* lba=}; lba=${lba%% *}
+	fb oem img begin "$2" "$back" "$uniq" "${lba%%..*}" "${lba##*..}" | grep -aq OKAY || { echo "xl: the loader refused the image file" >&2; exit 1; }
+	while read -r f p c _; do
+		fb oem img ext "$f" "$p" "$c" | grep -aq OKAY || { echo "xl: the loader refused the extent $f $p $c" >&2; exit 1; }
+	done < "$3"
+	fb oem img end | grep -a -E 'OKAY|FAIL' ;;
+imgtest) enter && fb oem imgtest 2>&1 | grep -a -E 'OKAY|FAIL' ; fb oem log >/dev/null; fetch_log logs/loader.log; grep -a 'imgtest:' logs/loader.log ;;
+imgclear) enter && fb oem img clear 2>&1 | grep -a -E 'OKAY|FAIL' ;;
 state) state ;;
 *) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0" ;;
 esac

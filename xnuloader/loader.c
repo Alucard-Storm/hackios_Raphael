@@ -1534,6 +1534,7 @@ ufs_survey(void)
 #define BLOCK_MAX_PARTS    160
 #define BLOCK_MAX_UNITS    16
 #define BLOCK_PART_UNIT    1u                          /* the entry is a whole logical unit, not a partition */
+#define BLOCK_PART_VIRTUAL 2u                          /* the entry is an image file inside another partition ("oem img"): its blocks are the file's, not a place on the unit */
 #define BLOCK_OP_READ      0u
 #define BLOCK_OP_WRITE     1u
 /*
@@ -1662,6 +1663,26 @@ static struct {
 	uint64_t first, last;          /* its first and last LBA of unit 0 */
 	uint64_t window_lo, window_hi; /* in the partition's blocks */
 } store_grant;
+
+/*
+ * "oem img": a file inside another partition, shown to the kernel as a partition of its own. The host
+ * lists where the file's blocks are on the partition (the extents, in 4096-byte blocks: tools/android/
+ * hakios-img on the phone's Android prints them for a pinned file) and the loader serves
+ * the file's block n from wherever that is. Nothing outside the extents is reachable through it, and
+ * the backing partition has to be what the host read it to be (GUID and range) or the file is not
+ * offered. The contents are raw: the partition below Android's /data is encrypted by the phone's
+ * controller, which this loader does not use, so what is written here is stored and read back as it is.
+ */
+#define IMG_MAX_EXTENTS 2048
+static struct {
+	int set, open;                 /* open: a table is being loaded and is not to be used yet */
+	char name[36], backing[36];
+	efi_guid uniq;
+	uint64_t first, last;          /* the backing partition's first and last LBA of unit 0 */
+	uint64_t total;                /* the file's blocks */
+	uint32_t n;
+	struct { uint64_t file, phys, count; } ext[IMG_MAX_EXTENTS];
+} img_map;
 static uint64_t block_writes, block_writes_refused, block_write_bytes;
 
 /* the bytes of a device path before its end node */
@@ -2088,6 +2109,43 @@ block_start(void)
 		}
 	}
 	BS->free_pool(handles);
+	if (img_map.set && block_shared.parts + nunits + 1 < BLOCK_MAX_PARTS) {
+		/* the image file: only when its backing partition is what the host read it to be */
+		for (uint32_t b = 0; b < block_shared.parts; b++) {
+			struct loader_block_part *bp = &block_shared.part[b], *vp = &block_shared.part[block_shared.parts];
+			unsigned k = 0;
+
+			while (img_map.backing[k] != 0 && bp->name[k] == img_map.backing[k]) k++;
+			if (img_map.backing[k] != 0 || bp->name[k] != 0) {
+				continue;
+			}
+			if (memcmp(&block_ids[b].uniq, &img_map.uniq, sizeof(efi_guid)) != 0 || bp->start_lba != img_map.first ||
+			    block_ids[b].end_lba != img_map.last || bp->unit != 0 || bp->block_size != 4096 ||
+			    bp->blocks != img_map.last - img_map.first + 1 || block_bios[b]->media->read_only) {
+				print("ufs: %s: the image file is not offered: %s is not what it was read to be\n", img_map.name,
+				    img_map.backing);
+				break;
+			}
+			memset(vp, 0, sizeof(*vp));
+			for (k = 0; img_map.name[k] != 0; k++) vp->name[k] = img_map.name[k];
+			vp->block_size = 4096;
+			vp->blocks = img_map.total;
+			vp->unit = 0;
+			vp->flags = BLOCK_PART_VIRTUAL;
+			block_ids[block_shared.parts] = block_ids[b];
+			block_bios[block_shared.parts] = block_bios[b];
+			if (block_write_requested) {
+				/* the whole file may be written: it is what the host set aside for this, inside blocks nothing else uses */
+				block_write_part = (int)block_shared.parts;
+				block_write_lo = 0;
+				block_write_hi = img_map.total;
+			}
+			print("ufs: %s: the image file in %s, %d extents, %d blocks of 4096\n", img_map.name, img_map.backing,
+			    (uint64_t)img_map.n, img_map.total);
+			block_shared.parts++;
+			break;
+		}
+	}
 	block_id_count = block_shared.parts;
 	for (uint64_t u = 0; u < nunits; u++) {
 		struct loader_block_part *bp = &block_shared.part[block_shared.parts];
@@ -2224,6 +2282,59 @@ block_io2_probe(efi_handle h, efi_block_io *bio)
 	    t_sync * 1000000 / freq, t_issue * 1000000 / freq, returned_done, t_all * 1000000 / freq, pending);
 }
 
+/* blocks of the file at lba, through its extents; a piece at a time, for pieces that are not next to each other */
+static efi_status
+img_rw(efi_block_io *bio, int write, uint64_t lba, uint64_t count, uint8_t *buf)
+{
+	if (!img_map.set || count == 0 || lba >= img_map.total || count > img_map.total - lba) {
+		return 0x8000000000000002ULL;           /* EFI_INVALID_PARAMETER */
+	}
+	while (count != 0) {
+		uint32_t e = 0;
+		uint64_t piece, phys;
+		efi_status s;
+
+		while (e < img_map.n && !(lba >= img_map.ext[e].file && lba - img_map.ext[e].file < img_map.ext[e].count)) {
+			e++;
+		}
+		if (e == img_map.n) {
+			return 0x8000000000000002ULL;
+		}
+		piece = img_map.ext[e].count - (lba - img_map.ext[e].file);
+		if (piece > count) {
+			piece = count;
+		}
+		phys = img_map.ext[e].phys + (lba - img_map.ext[e].file);
+		s = write ? bio->write_blocks(bio, bio->media->media_id, phys, piece * 4096, buf) :
+		    bio->read_blocks(bio, bio->media->media_id, phys, piece * 4096, buf);
+		if (EFI_ERROR(s)) {
+			return s;
+		}
+		buf += piece * 4096;
+		lba += piece;
+		count -= piece;
+	}
+	return 0;
+}
+
+static efi_status
+blk_read(uint32_t part, efi_block_io *bio, uint64_t lba, uint64_t bytes, uint8_t *buf)
+{
+	if (block_shared.part[part].flags & BLOCK_PART_VIRTUAL) {
+		return img_rw(bio, 0, lba, bytes / 4096, buf);
+	}
+	return bio->read_blocks(bio, bio->media->media_id, lba, bytes, buf);
+}
+
+static efi_status
+blk_write(uint32_t part, efi_block_io *bio, uint64_t lba, uint64_t bytes, uint8_t *buf)
+{
+	if (block_shared.part[part].flags & BLOCK_PART_VIRTUAL) {
+		return img_rw(bio, 1, lba, bytes / 4096, buf);
+	}
+	return bio->write_blocks(bio, bio->media->media_id, lba, bytes, buf);
+}
+
 /* one request, if there is one: called from core 0's watch loop while the kernel runs */
 static void
 block_poll(void)
@@ -2290,10 +2401,10 @@ block_poll(void)
 				flush_dcache((uint64_t)(uintptr_t)block_buffer,
 				    (uint64_t)(uintptr_t)block_buffer + bytes);
 				want = ufs_crc32(block_buffer, bytes);
-				s = bio->write_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
+				s = blk_write(part, bio, lba, bytes, block_buffer);
 				if (!EFI_ERROR(s)) {
 					bio->flush_blocks(bio);
-					s = bio->read_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
+					s = blk_read(part, bio, lba, bytes, block_buffer);
 					flush_dcache((uint64_t)(uintptr_t)block_buffer,
 					    (uint64_t)(uintptr_t)block_buffer + bytes);
 					if (!EFI_ERROR(s) && ufs_crc32(block_buffer, bytes) != want) {
@@ -2308,7 +2419,7 @@ block_poll(void)
 				}
 			}
 		} else if (op == BLOCK_OP_READ) {
-			s = bio->read_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
+			s = blk_read(part, bio, lba, bytes, block_buffer);
 			/* what the controller wrote is in memory; drop whatever this core held of the buffer */
 			flush_dcache((uint64_t)(uintptr_t)block_buffer, (uint64_t)(uintptr_t)block_buffer + bytes);
 		} else {
@@ -2327,6 +2438,94 @@ block_poll(void)
 	block_shared.answer.answered = request;
 	clean_dcache((uint64_t)(uintptr_t)&block_shared.answer,
 	    (uint64_t)(uintptr_t)&block_shared.answer + sizeof(block_shared.answer));
+}
+
+/*
+ * Idle only, never while a kernel runs. Each region of the file is read, written with a pattern, read
+ * back, put back as it was and read again; and the blocks of the partition just before the file's first
+ * extent and just after its last are looked at before and after, to see that nothing outside the file
+ * was touched. Returns 0 when all is as it should be, else a short text.
+ */
+static const char *
+img_selftest(void)
+{
+	static uint8_t saved[4 * 4096] __attribute__((aligned(0x2000)));
+	uint32_t part = BLOCK_MAX_PARTS, nregions = 0;
+	uint64_t at[4];
+	efi_block_io *bio;
+	uint32_t before_lo = 0, before_hi = 0;
+	uint64_t lo_phys = ~0ULL, hi_phys = 0;
+
+	if (!img_map.set) return "no image file is set";
+	block_start();
+	for (uint32_t i = 0; i < block_shared.parts; i++) {
+		if (block_shared.part[i].flags & BLOCK_PART_VIRTUAL) part = i;
+	}
+	if (part == BLOCK_MAX_PARTS) return "the image file was not offered (see the log)";
+	bio = block_bios[part];
+	if (img_map.total < 8) return "the file is under 8 blocks";
+	/* the start, the end, the middle, and the first place the file jumps to another extent */
+	at[nregions++] = 0;
+	at[nregions++] = img_map.total - 4;
+	at[nregions++] = img_map.total / 2;
+	if (img_map.n > 1 && img_map.ext[1].file >= 2 && img_map.ext[1].file + 2 <= img_map.total) at[nregions++] = img_map.ext[1].file - 2;
+	for (uint32_t e = 0; e < img_map.n; e++) {
+		if (img_map.ext[e].phys < lo_phys) lo_phys = img_map.ext[e].phys;
+		if (img_map.ext[e].phys + img_map.ext[e].count > hi_phys) hi_phys = img_map.ext[e].phys + img_map.ext[e].count;
+	}
+	{
+		/* the blocks beside the file's extents, looked at now and again at the end */
+		static uint8_t edge[4096] __attribute__((aligned(0x2000)));
+
+		if (lo_phys > 0 && !EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, lo_phys - 1, 4096, edge))) {
+			flush_dcache((uint64_t)(uintptr_t)edge, (uint64_t)(uintptr_t)edge + 4096);
+			before_lo = ufs_crc32(edge, 4096);
+		}
+		if (!EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, hi_phys, 4096, edge))) {
+			flush_dcache((uint64_t)(uintptr_t)edge, (uint64_t)(uintptr_t)edge + 4096);
+			before_hi = ufs_crc32(edge, 4096);
+		}
+		for (uint32_t r = 0; r < nregions; r++) {
+			uint64_t v = at[r];
+			uint32_t c0, c1;
+
+			if (EFI_ERROR(img_rw(bio, 0, v, 4, saved))) return "reading the file failed";
+			flush_dcache((uint64_t)(uintptr_t)saved, (uint64_t)(uintptr_t)saved + sizeof(saved));
+			c0 = ufs_crc32(saved, sizeof(saved));
+			for (unsigned i = 0; i < sizeof(block_buffer) && i < sizeof(saved); i++) block_buffer[i] = (uint8_t)(i * 31 + r * 7 + 0xa5);
+			flush_dcache((uint64_t)(uintptr_t)block_buffer, (uint64_t)(uintptr_t)block_buffer + sizeof(saved));
+			if (EFI_ERROR(img_rw(bio, 1, v, 4, block_buffer))) return "writing the file failed";
+			memset(block_buffer, 0, sizeof(saved));
+			if (EFI_ERROR(img_rw(bio, 0, v, 4, block_buffer))) return "reading back failed";
+			flush_dcache((uint64_t)(uintptr_t)block_buffer, (uint64_t)(uintptr_t)block_buffer + sizeof(saved));
+			for (unsigned i = 0; i < sizeof(saved); i++) {
+				if (block_buffer[i] != (uint8_t)(i * 31 + r * 7 + 0xa5)) {
+					img_rw(bio, 1, v, 4, saved);
+					return "what was written reads back different";
+				}
+			}
+			if (EFI_ERROR(img_rw(bio, 1, v, 4, saved))) return "putting back failed";
+			memset(block_buffer, 0, sizeof(saved));
+			if (EFI_ERROR(img_rw(bio, 0, v, 4, block_buffer))) return "reading after the restore failed";
+			flush_dcache((uint64_t)(uintptr_t)block_buffer, (uint64_t)(uintptr_t)block_buffer + sizeof(saved));
+			c1 = ufs_crc32(block_buffer, sizeof(saved));
+			if (c0 != c1) return "the restore did not put it back";
+			print("imgtest: file blocks %d..%d ok\n", v, v + 3);
+		}
+		if (lo_phys > 0) {
+			if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, lo_phys - 1, 4096, edge)) || (flush_dcache((uint64_t)(uintptr_t)edge, (uint64_t)(uintptr_t)edge + 4096), ufs_crc32(edge, 4096)) != before_lo) {
+				return "the block before the file changed";
+			}
+		}
+		if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, hi_phys, 4096, edge)) || (flush_dcache((uint64_t)(uintptr_t)edge, (uint64_t)(uintptr_t)edge + 4096), ufs_crc32(edge, 4096)) != before_hi) {
+			return "the block after the file changed";
+		}
+		/* out of the file is refused, not mapped somewhere */
+		if (!EFI_ERROR(img_rw(bio, 0, img_map.total - 1, 2, block_buffer)) || !EFI_ERROR(img_rw(bio, 0, img_map.total, 1, block_buffer))) {
+			return "a read past the file's end was served";
+		}
+	}
+	return 0;
 }
 
 static void
@@ -4300,7 +4499,8 @@ fb_command(char *cmd)
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
 		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
-		    starts_with(cmd, "oem touch") || starts_with(cmd, "oem parts") || starts_with(cmd, "oem store"))) {
+		    starts_with(cmd, "oem touch") || starts_with(cmd, "oem parts") || starts_with(cmd, "oem store") ||
+		    starts_with(cmd, "oem img"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
@@ -4388,6 +4588,82 @@ fb_command(char *cmd)
 					    store_grant.window_hi);
 					fb_reply("OKAY", "granted; the run still needs ufs_write=1");
 				}
+			}
+		} else if (starts_with(cmd, "oem imgtest")) {
+			const char *why = img_selftest();
+
+			if (why != NULL) {
+				print("imgtest: FAILED: %s\n", why);
+				fb_reply("FAIL", why);
+			} else {
+				print("imgtest: all regions written, read back, restored; the blocks beside the file untouched\n");
+				fb_reply("OKAY", "image file test passed");
+			}
+		} else if (starts_with(cmd, "oem img ")) {
+			/* oem img clear | begin <name> <backing> <unique-guid> <first-lba> <last-lba> (hex)
+			 *               | ext <file-block> <partition-block> <count> (decimal) | end */
+			const char *a = cmd + 8;
+
+			if (str_eq(a, "clear")) {
+				memset(&img_map, 0, sizeof(img_map));
+				block_shared.magic = 0;
+				fb_reply("OKAY", "image file cleared");
+			} else if (starts_with(a, "begin ")) {
+				const char *f[5];
+				unsigned n = 0, len[2];
+
+				a += 6;
+				while (*a && n < 5) {
+					f[n++] = a;
+					while (*a && *a != ' ') a++;
+					if (n <= 2) len[n - 1] = (unsigned)(a - f[n - 1]);
+					while (*a == ' ') a++;
+				}
+				memset(&img_map, 0, sizeof(img_map));
+				block_shared.magic = 0;
+				if (n != 5 || *a || len[0] == 0 || len[0] >= sizeof(img_map.name) || len[1] == 0 ||
+				    len[1] >= sizeof(img_map.backing) || guid_parse(f[2], &img_map.uniq) != 0) {
+					memset(&img_map, 0, sizeof(img_map));
+					fb_reply("FAIL", "usage: img begin name backing guid first last");
+				} else {
+					for (unsigned i = 0; i < len[0]; i++) img_map.name[i] = f[0][i];
+					for (unsigned i = 0; i < len[1]; i++) img_map.backing[i] = f[1][i];
+					img_map.first = parse_number(f[3], 16);
+					img_map.last = parse_number(f[4], 16);
+					img_map.open = 1;
+					fb_reply("OKAY", "send the extents, then end");
+				}
+			} else if (starts_with(a, "ext ") && img_map.open) {
+				uint64_t v[3];
+				unsigned n = 0;
+
+				a += 4;
+				while (*a && n < 3) {
+					v[n++] = parse_number(a, 10);
+					while (*a && *a != ' ') a++;
+					while (*a == ' ') a++;
+				}
+				if (n != 3 || *a || v[2] == 0 || img_map.n == IMG_MAX_EXTENTS || v[0] != img_map.total ||
+				    v[1] + v[2] > img_map.last - img_map.first + 1 || v[1] + v[2] < v[1]) {
+					memset(&img_map, 0, sizeof(img_map));
+					fb_reply("FAIL", "extent refused (not next in the file, or outside the partition); table dropped");
+				} else {
+					img_map.ext[img_map.n].file = v[0];
+					img_map.ext[img_map.n].phys = v[1];
+					img_map.ext[img_map.n].count = v[2];
+					img_map.n++;
+					img_map.total += v[2];
+					fb_reply("OKAY", "");
+				}
+			} else if (str_eq(a, "end") && img_map.open && img_map.n != 0) {
+				img_map.open = 0;
+				img_map.set = 1;
+				block_shared.magic = 0;
+				print("ufs: image file %s in %s: %d extents, %d blocks, for the runs of this loader\n", img_map.name,
+				    img_map.backing, (uint64_t)img_map.n, img_map.total);
+				fb_reply("OKAY", "image file set; a run needs ufs_write=1 to write it");
+			} else {
+				fb_reply("FAIL", "img: clear | begin | ext | end");
 			}
 		} else if (starts_with(cmd, "oem ramdisk")) {
 			/* "oem ramdisk": the next download is a root image for the resident area; "oem ramdisk none" drops it */

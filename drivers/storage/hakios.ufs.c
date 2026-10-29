@@ -73,6 +73,7 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
 #define BLOCK_MAX_PARTS    160
 #define BLOCK_MAX_UNITS    16
 #define BLOCK_PART_UNIT    1u                          /* a whole logical unit, not a partition */
+#define BLOCK_PART_VIRTUAL 2u               /* an image file inside another partition (the loader's "oem img"), not a place on the unit */
 #define BLOCK_OP_READ      0u
 #define BLOCK_OP_WRITE     1u
 #define BLOCK_OP_WRITE_FAST 2u                         /* written only: the data volume's (the loader, BLOCK_OP_WRITE_FAST) */
@@ -1374,7 +1375,8 @@ ufs_native_map(bool all_units)
 		for (uint32_t i = 0; i < ufs_parts; i++) {
 			volatile struct loader_block_part *e = &ufs_page->part[i];
 
-			if (e->unit < 8 && (mask & (1u << e->unit)) && e->block_size == 4096) {
+			/* an image file is blocks of another partition, which only the loader knows where */
+			if (e->unit < 8 && (mask & (1u << e->unit)) && e->block_size == 4096 && (e->flags & BLOCK_PART_VIRTUAL) == 0) {
 				ufs_lun[i] = (uint8_t)e->unit;
 				ufs_lun_offset[i] = e->start_lba * 4096;
 			}
@@ -1779,6 +1781,7 @@ hakios_ufs_init(void)
 		if (offered != 0) {
 			uint32_t i = offered - 1;
 			bool darwin = strncmp((const char *)ufs_page->part[i].name, "darwin", 7) == 0;
+			bool virt = (ufs_page->part[i].flags & BLOCK_PART_VIRTUAL) != 0;     /* the loader's image file: all of it is ours */
 			const char *why = NULL;
 			uint64_t lo = darwin ? UFS_WRITE_FIRST : ufs_page->write_first;
 			uint64_t hi = darwin ? UFS_DARWIN_BLOCKS : ufs_page->write_end;
@@ -1808,7 +1811,8 @@ hakios_ufs_init(void)
 				why = "it does not begin where it did";
 			} else if (darwin && ufs_page->part[i].blocks != UFS_DARWIN_BLOCKS) {
 				why = "it is not the size it was";
-			} else if (lo == 0 || lo >= hi || hi > ufs_page->part[i].blocks) {
+			} else if ((virt && hi > ufs_page->part[i].blocks) ||
+			    (!virt && (lo == 0 || lo >= hi || hi > ufs_page->part[i].blocks)) || lo >= hi) {
 				why = "the window is not inside it";
 			}
 			if (why != NULL) {
