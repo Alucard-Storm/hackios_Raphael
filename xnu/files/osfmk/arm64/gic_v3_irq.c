@@ -160,6 +160,11 @@ gic_send_sgi(uint32_t phys_id, uint32_t sgi)
 {
 	uint64_t aff0 = phys_id & 0xff, aff1 = (phys_id >> 8) & 0xff;
 
+	/*
+	 * Publish what cpu_signal() stored (the signal flags) before the target can take its interrupt: a write to
+	 * ICC_SGI1R_EL1 is not ordered after earlier stores without this (HeliumStudio-Dev's raphael-bringup; Linux does the same).
+	 */
+	__builtin_arm_dsb(DSB_ST);
 	__builtin_arm_wsr64("ICC_SGI1R_EL1", ((uint64_t)sgi << 24) | (aff1 << 16) | (1ULL << (aff0 & 15)));
 	__builtin_arm_isb(ISB_SY);
 }
@@ -356,6 +361,8 @@ gic_v3_irq_quiesce(void)
 		return;         /* as early as this there is no interrupt, nor a cpu number to ask for */
 	}
 	cpu = cpu_number();
+	/* The loader's firmware has no handler for XNU's virtual timer: it must not fire under it (HeliumStudio-Dev's raphael-bringup). */
+	gic_mask(GIC_INTID_VTIMER);
 	/* (what drivers had of the shared interrupts goes with this kernel: none of them may fire under the loader) */
 	for (unsigned i = 0; i < GIC_SPI_MOST; i++) {
 		uint32_t intid = gic_spi[i].intid;

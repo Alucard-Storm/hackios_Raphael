@@ -231,7 +231,7 @@ run() { # run <oem command> <label>
 		local deadline=$(( $(date +%s) + ${XL_SECS:-8} + 100 )) followed=$(date +%s)
 		while :; do
 			result=$(FB_TIMEOUT=15 fb getvar result | grep '^result:')
-			case "$result" in ""|*running*) ;; *) break ;; esac
+			case "$result" in ""|"result:"|"result: "|*running*) ;; *) break ;; esac   # (an empty answer is not a result: HeliumStudio-Dev)
 			[ "$(date +%s)" -ge "$deadline" ] && { result=; break; }
 			if [ -n "$XL_FOLLOW" ] && [ $(( $(date +%s) - followed )) -ge "$XL_FOLLOW" ]; then
 				followed=$(date +%s)
