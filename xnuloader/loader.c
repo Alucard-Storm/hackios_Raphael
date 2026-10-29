@@ -4301,6 +4301,138 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 #define USB_CHUNK    (1024 * 1024)
 
 static usb_device_protocol *USB;
+/* CRC-32 as ufs_crc32 above, a byte at a time through a table: the system image is 2.4 GB */
+static uint32_t crc32_table[256];
+static uint32_t
+crc32_step(uint32_t c, const uint8_t *p, uint64_t n)
+{
+	if (crc32_table[255] == 0) {
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t v = i;
+
+			for (int k = 0; k < 8; k++) v = (v >> 1) ^ (0xedb88320u & (0u - (v & 1)));
+			crc32_table[i] = v;
+		}
+	}
+	for (uint64_t i = 0; i < n; i++) {
+		c = (c >> 8) ^ crc32_table[(c ^ p[i]) & 0xff];
+	}
+	return c;
+}
+
+/*
+ * "oem rdflash": the system image (the resident RAM disk) kept in the image file, so that a boot does not
+ * have to be sent it over USB. At block VLBA of the file a header block, then the image from VLBA+1.
+ *   save: the image the host has uploaded is written, read back and compared, the header last
+ *         (and a zeroed one first: a save that is cut short leaves no header, not a wrong one)
+ *   load: the image is read into the resident RAM disk and its CRC checked against the header's
+ *   info: what the header says, into the log
+ */
+struct rd_head {
+	char magic[8];
+	uint64_t bytes;
+	uint32_t crc, version;
+	uint64_t stamp;
+};
+#define RD_MAGIC "HKRDIMG1"
+
+static const char *
+rd_flash(const char *what, uint64_t vlba, uint64_t limit_mib)
+{
+	static uint8_t headblock[4096] __attribute__((aligned(0x2000)));
+	struct rd_head *h = (struct rd_head *)headblock;
+	uint32_t part = BLOCK_MAX_PARTS;
+	efi_block_io *bio;
+	uint64_t started = READ_SYSREG(CNTVCT_EL0), freq = READ_SYSREG(CNTFRQ_EL0);
+
+	if (!img_map.set) return "no image file is set (xl img)";
+	block_start();
+	for (uint32_t i = 0; i < block_shared.parts; i++) {
+		if (block_shared.part[i].flags & BLOCK_PART_VIRTUAL) part = i;
+	}
+	if (part == BLOCK_MAX_PARTS) return "the image file was not offered (see the log)";
+	bio = block_bios[part];
+	if (vlba == 0 || vlba >= img_map.total) return "the block is outside the file";
+	if (EFI_ERROR(img_rw(bio, 0, vlba, 1, headblock))) return "reading the header failed";
+	flush_dcache((uint64_t)(uintptr_t)headblock, (uint64_t)(uintptr_t)headblock + sizeof(headblock));
+
+	if (str_eq(what, "info")) {
+		if (memcmp(h->magic, RD_MAGIC, 8) != 0 || h->version != 1) {
+			print("rdflash: no system image in the file at block %d\n", vlba);
+		} else {
+			print("rdflash: bytes %d crc %x stamp %d\n", h->bytes, (uint64_t)h->crc, h->stamp);
+		}
+		return 0;
+	}
+	if (str_eq(what, "save")) {
+		uint64_t bytes = resident_rd_size, done = 0;
+		const uint8_t *src = (const uint8_t *)(win_base + RESIDENT_RD_OFFSET);
+		uint32_t crc = 0xffffffffu;
+
+		if (bytes == 0) return "no system image uploaded to save (xl ramdisk first)";
+		if (limit_mib != 0 && limit_mib * 1048576 < bytes) bytes = limit_mib * 1048576;      /* a trial with the first MiB only */
+		if (bytes % 4096 || bytes / 4096 + 1 > img_map.total - vlba) return "the image does not fit (or is not whole blocks)";
+		memset(headblock, 0, sizeof(headblock));
+		flush_dcache((uint64_t)(uintptr_t)headblock, (uint64_t)(uintptr_t)headblock + sizeof(headblock));
+		if (EFI_ERROR(img_rw(bio, 1, vlba, 1, headblock))) return "writing the header failed";
+		while (done < bytes) {
+			uint64_t n = bytes - done > BLOCK_BUFFER_SIZE ? BLOCK_BUFFER_SIZE : bytes - done;
+
+			flush_dcache((uint64_t)(uintptr_t)src + done, (uint64_t)(uintptr_t)src + done + n);
+			crc = crc32_step(crc, src + done, n);
+			if (EFI_ERROR(img_rw(bio, 1, vlba + 1 + done / 4096, n / 4096, (uint8_t *)(uintptr_t)src + done))) return "writing the image failed";
+			bio->flush_blocks(bio);
+			if (EFI_ERROR(img_rw(bio, 0, vlba + 1 + done / 4096, n / 4096, block_buffer))) return "reading back failed";
+			flush_dcache((uint64_t)(uintptr_t)block_buffer, (uint64_t)(uintptr_t)block_buffer + n);
+			if (memcmp(block_buffer, src + done, n) != 0) return "what was written reads back different";
+			done += n;
+			if (wdt_armed) wdt_pet();
+		}
+		memset(headblock, 0, sizeof(headblock));
+		memcpy(h->magic, RD_MAGIC, 8);
+		h->bytes = bytes;
+		h->crc = ~crc;
+		h->version = 1;
+		h->stamp = 0;
+		flush_dcache((uint64_t)(uintptr_t)headblock, (uint64_t)(uintptr_t)headblock + sizeof(headblock));
+		if (EFI_ERROR(img_rw(bio, 1, vlba, 1, headblock))) return "writing the header failed";
+		bio->flush_blocks(bio);
+		print("rdflash: saved %d bytes, crc %x, %d ms\n", bytes, (uint64_t)~crc, (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / freq);
+		return 0;
+	}
+	if (str_eq(what, "load")) {
+		struct payload_info pi;
+		uint64_t bytes, done = 0;
+		uint8_t *dest;
+
+		if (memcmp(h->magic, RD_MAGIC, 8) != 0 || h->version != 1) return "no system image in the file";
+		bytes = h->bytes;
+		parse_payload(&pi, 0);
+		if (!choose_window(&pi) || win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE) return "no memory window";
+		if (bytes == 0 || bytes % 4096 || bytes > win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE ||
+		    bytes / 4096 + 1 > img_map.total - vlba) return "the header's size is not one this can load";
+		dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
+		resident_rd_size = 0;
+		uint32_t crc = 0xffffffffu;
+		while (done < bytes) {
+			uint64_t n = bytes - done > BLOCK_BUFFER_SIZE ? BLOCK_BUFFER_SIZE : bytes - done;
+
+			if (EFI_ERROR(img_rw(bio, 0, vlba + 1 + done / 4096, n / 4096, dest + done))) return "reading the image failed";
+			flush_dcache((uint64_t)(uintptr_t)dest + done, (uint64_t)(uintptr_t)dest + done + n);
+			crc = crc32_step(crc, dest + done, n);
+			done += n;
+			if (wdt_armed) wdt_pet();
+		}
+		uint64_t read_ms = (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / freq;
+		if (~crc != h->crc) return "the image read back with a different CRC; not used";
+		resident_rd_size = bytes;
+		print("rdflash: loaded %d bytes into the RAM disk, read %d ms, checked %d ms\n", bytes, read_ms,
+		    (READ_SYSREG(CNTVCT_EL0) - started) * 1000 / freq - read_ms);
+		return 0;
+	}
+	return "rdflash: save | load | info";
+}
+
 static int download_to_ramdisk;     /* set by "oem ramdisk" for the one download that follows */
 static uint8_t *usb_rx_buf, *usb_tx_buf;
 static int usb_connected;
@@ -4500,7 +4632,7 @@ fb_command(char *cmd)
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
 		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
 		    starts_with(cmd, "oem touch") || starts_with(cmd, "oem parts") || starts_with(cmd, "oem store") ||
-		    starts_with(cmd, "oem img"))) {
+		    starts_with(cmd, "oem img") || starts_with(cmd, "oem rdflash"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
@@ -4664,6 +4796,28 @@ fb_command(char *cmd)
 				fb_reply("OKAY", "image file set; a run needs ufs_write=1 to write it");
 			} else {
 				fb_reply("FAIL", "img: clear | begin | ext | end");
+			}
+		} else if (starts_with(cmd, "oem rdflash ")) {
+			/* oem rdflash save|load|info <file block, hex> */
+			char what[8];
+			const char *a = cmd + 12;
+			unsigned n = 0;
+
+			while (*a && *a != ' ' && n < sizeof(what) - 1) what[n++] = *a++;
+			what[n] = 0;
+			while (*a == ' ') a++;
+			uint64_t vlba = parse_number(a, 16), limit = 0;
+
+			while (*a && *a != ' ') a++;
+			while (*a == ' ') a++;
+			if (*a) limit = parse_number(a, 16);
+			const char *why = rd_flash(what, vlba, limit);
+
+			if (why != NULL) {
+				print("rdflash: FAILED: %s\n", why);
+				fb_reply("FAIL", why);
+			} else {
+				fb_reply("OKAY", "");
 			}
 		} else if (starts_with(cmd, "oem ramdisk")) {
 			/* "oem ramdisk": the next download is a root image for the resident area; "oem ramdisk none" drops it */

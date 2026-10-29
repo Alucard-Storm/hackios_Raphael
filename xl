@@ -409,6 +409,10 @@ img) # img <name> <extents file> [backing partition]: show the file to the loade
 	fb oem img end | grep -a -E 'OKAY|FAIL' ;;
 imgtest) enter && fb oem imgtest 2>&1 | grep -a -E 'OKAY|FAIL' ; fb oem log >/dev/null; fetch_log logs/loader.log; grep -a 'imgtest:' logs/loader.log ;;
 imgclear) enter && fb oem img clear 2>&1 | grep -a -E 'OKAY|FAIL' ;;
+rdsave|rdload|rdinfo) # the system image kept in the image file (xl img first): rdsave after xl ramdisk, rdload instead of it, rdinfo what is kept
+	# layout of the file (4096-byte blocks): 0..1048575 the data volume (var_store), 1048576 on the system image (header, then the image)
+	enter || exit 1
+	FB_TIMEOUT=600 fb oem rdflash "${1#rd}" 100000 $2 2>&1 | grep -a -E 'FAIL' ; fb oem log >/dev/null; fetch_log logs/loader.log; grep -a 'rdflash:' logs/loader.log | tail -2 ;;
 state) state ;;
 *) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0" ;;
 esac

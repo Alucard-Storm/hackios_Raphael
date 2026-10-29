@@ -88,7 +88,10 @@ phone_to_android() {
 	[ "$(./xl state)" = android ] && return 0
 	[ "$(./xl state)" = loader ] && ./xl reboot >/dev/null 2>&1
 	for _ in $(seq 1 60); do
-		[ "$(./xl state)" = android ] && adb shell true >/dev/null 2>&1 && return 0
+		if [ "$(./xl state)" = android ] && [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; then
+			sleep 5		# the loader is not reachable for a few seconds after Android says it is up
+			return 0
+		fi
 		sleep 3
 	done
 	return 1
@@ -185,12 +188,39 @@ if [ $PERSIST = 1 ]; then
 	ARGS="$ARGS ufs_write=1 var_store=1 var_store_dev=hakios"
 fi
 echo "   $SECS s, arguments: $ARGS"
-./xl enter || die "the loader did not come up"
+entered=0
+for try in 1 2 3; do ./xl enter && { entered=1; break; }; sleep 5; done
+[ $entered = 1 ] || die "the loader did not come up"
+loaded=0
 if [ $PERSIST = 1 ]; then
 	./xl img hakios logs/ios.ext | grep -q OKAY || die "the loader did not take the image file"
+	# the system image kept in the image file: loaded from there (a few seconds) when it is the one built here
+	want=$(python3 -c 'import sys, zlib
+c = 0
+with open(sys.argv[1], "rb") as f:
+    while True:
+        b = f.read(1 << 24)
+        if not b: break
+        c = zlib.crc32(b, c)
+print(c)' userland/system.apfs)
+	size=$(stat -c %s userland/system.apfs)
+	have=$(./xl rdinfo | tail -1)
+	have_size=$(echo "$have" | awk '$2 == "bytes" { print $3 }')
+	have_crc=$(echo "$have" | awk '$4 == "crc" { print $5 }')
+	if [ "$have_size" = "$size" ] && [ -n "$have_crc" ] && [ $((16#$have_crc)) -eq "$want" ]; then
+		echo "   loading the system image from the image file"
+		./xl rdload | grep -q 'loaded' && loaded=1 || echo "   (loading failed: uploading instead)"
+	else
+		echo "   the image file holds no system image, or an older one: it is uploaded now and kept there"
+	fi
 fi
-echo "   uploading the system image (about 90 s; the screen shows the Silicium logo until iOS starts)"
-./xl ramdisk userland/system.apfs || die "the upload failed"
+if [ $loaded = 0 ]; then
+	echo "   uploading the system image (about 90 s; the screen shows the Silicium logo until iOS starts)"
+	./xl ramdisk userland/system.apfs || die "the upload failed"
+	if [ $PERSIST = 1 ]; then
+		./xl rdsave | grep -q 'saved' && echo "   kept in the image file: the next boot loads it from there" || echo "   (could not keep it in the image file; the next boot uploads again)"
+	fi
+fi
 XL_CMDLINE="$ARGS" XL_SECS="$SECS" ./xl run
 echo
 echo "The phone is in the loader with the system image in its RAM. Again: ./xl run (with XL_CMDLINE and XL_SECS as above, or"
