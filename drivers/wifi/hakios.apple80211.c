@@ -200,6 +200,7 @@ static const char interface_name[16] = "en0";   /* (drivers/net/hakios.net.c mak
 
 static LCK_GRP_DECLARE(apple80211_lock_group, "hakios-apple80211");
 static LCK_MTX_DECLARE(apple80211_lock, &apple80211_lock_group);
+static char country[4] = "IN";           /* the country iOS last set (the phone's own until then), under apple80211_lock */
 static unsigned result_next;                    /* which of what the last scan heard a SCAN_RESULT request gets next */
 static uint32_t join_result;                    /* of the last join asked for: 0 while it runs, then Apple80211's number */
 
@@ -451,6 +452,66 @@ get(struct apple80211req *request)
 		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
 		break;
 	}
+	/*
+	 * What iOS's Wi-Fi daemon asks for right after a join and was refused: how the link runs. Plain figures, not
+	 * measured ones: a station that joined on the 5 GHz band with VHT. (apple80211_var.h: APPLE80211_MODE_11A 2, 11N
+	 * 0x10, 11AC 0x80.) Not joined: the same ENXIO as the other requests about the network.
+	 */
+	case 14: {                              /* the PHY modes the card has, and the one in use */
+		struct {
+			uint32_t version, phy_mode, active_phy_mode;
+		} answer = { .version = 1, .phy_mode = 0x1e | 0x80, .active_phy_mode = 2 | 0x10 | 0x80 };
+
+		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+		break;
+	}
+	case 8: {                               /* the link's rate, Mbit/s, per radio */
+		struct {
+			uint32_t version, radios, rate[4];
+		} answer = { .version = 1, .radios = 1, .rate = { 150 } };
+
+		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+		break;
+	}
+	case 17: {                              /* the noise floor, dBm, per radio and all together */
+		struct {
+			uint32_t version, radios;
+			int32_t each[4], all;
+			uint32_t unit;
+		} answer = { .version = 1, .radios = 1, .each = { -90 }, .all = -90 };
+
+		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+		break;
+	}
+	case 57: {                              /* the modulation and coding scheme in use */
+		struct {
+			uint32_t version, index;
+		} answer = { .version = 1, .index = 7 };
+
+		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+		break;
+	}
+	case 29: {                              /* why the last link ended: nothing has ended it */
+		struct {
+			uint32_t version, reason;
+		} answer = { .version = 1 };
+
+		error = give(request, &answer, sizeof(answer));
+		break;
+	}
+	case 51: {                              /* the country the radio is set to (what iOS set, else the phone's own) */
+		struct {
+			uint32_t version;
+			char code[4];
+			uint32_t pad;
+		} answer = { .version = 1 };
+
+		lck_mtx_lock(&apple80211_lock);
+		memcpy(answer.code, country, 3);
+		lck_mtx_unlock(&apple80211_lock);
+		error = give(request, &answer, sizeof(answer));
+		break;
+	}
 	default:
 		error = EOPNOTSUPP;
 		break;
@@ -597,6 +658,33 @@ set(const struct apple80211req *request, char *said, size_t said_size)
 	}
 	case 10:
 		return set_scan(request, said, said_size);
+	case 51: {                              /* the country: kept, said back to iOS when it asks; the radio's own rules stay */
+		struct {
+			uint32_t version;
+			char code[4];
+		} asked = { 0 };
+
+		if (request->req_len >= sizeof(asked) && copyin(request->req_data, &asked, sizeof(asked)) == 0 && asked.code[0] >= 'A' &&
+		    asked.code[0] <= 'Z' && asked.code[1] >= 'A' && asked.code[1] <= 'Z') {
+			lck_mtx_lock(&apple80211_lock);
+			memcpy(country, asked.code, 2);
+			country[2] = 0;
+			lck_mtx_unlock(&apple80211_lock);
+			snprintf(said, said_size, " (country: %c%c)", asked.code[0], asked.code[1]);
+		}
+		return 0;
+	}
+	/*
+	 * Settings iOS's Wi-Fi daemon makes on a card and expects to be taken: background scanning, roaming, the link's
+	 * quality reports, and so on (the numbers, with no names yet, are what it sends: 365, 383, 419, 422). Not acted
+	 * on here; refusing them did not stop a join, but they are what the daemon asks over and over, and a card that
+	 * takes them is a card it can finish its sequence with.
+	 */
+	case 365:
+	case 383:
+	case 419:
+	case 422:
+		return 0;
 	default:
 		return EOPNOTSUPP;
 	}

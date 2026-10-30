@@ -464,6 +464,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
 	[ "${DEVICE:-}" = raphael ] && cp com.hakios.wifi.raphael.plist root/LaunchDaemons/com.hakios.wifi.plist
+	# the network configuration iOS makes by itself on a first boot, which nothing here does: a Wi-Fi service for en0 by DHCP (src/init.c, seed_network_prefs)
+	[ "${DEVICE:-}" = raphael ] && cp network.preferences.plist root/etc/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS

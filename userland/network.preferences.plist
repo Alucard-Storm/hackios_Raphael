@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The network configuration a phone has after its first boot: one network service, Wi-Fi on en0, by DHCP, and
+  the set that lists it. Nothing on this port makes one by itself, so configd (whose IPConfiguration plug-in
+  brings en0 up and asks for an address once the radio's link is active) had no service for en0 and the system
+  went on without a network while the radio was joined. init puts this file into
+  /private/var/preferences/SystemConfiguration when there is none (src/init.c, seed_network_prefs).
+-->
+<plist version="1.0">
+<dict>
+	<key>CurrentSet</key>
+	<string>/Sets/0F6BD1A5-3C4B-4A1E-9A33-5B1D6C1A9E01</string>
+	<key>NetworkServices</key>
+	<dict>
+		<key>5D1F0C7E-2B34-4C86-9C15-8E4A7D3B6F02</key>
+		<dict>
+			<key>IPv4</key>
+			<dict>
+				<key>ConfigMethod</key>
+				<string>DHCP</string>
+			</dict>
+			<key>IPv6</key>
+			<dict>
+				<key>ConfigMethod</key>
+				<string>Automatic</string>
+			</dict>
+			<key>Interface</key>
+			<dict>
+				<key>DeviceName</key>
+				<string>en0</string>
+				<key>Hardware</key>
+				<string>AirPort</string>
+				<key>Type</key>
+				<string>IEEE80211</string>
+				<key>UserDefinedName</key>
+				<string>Wi-Fi</string>
+			</dict>
+			<key>Proxies</key>
+			<dict>
+				<key>ExceptionsList</key>
+				<array>
+					<string>*.local</string>
+					<string>169.254/16</string>
+				</array>
+				<key>FTPPassive</key>
+				<integer>1</integer>
+			</dict>
+			<key>UserDefinedName</key>
+			<string>Wi-Fi</string>
+		</dict>
+	</dict>
+	<key>Sets</key>
+	<dict>
+		<key>0F6BD1A5-3C4B-4A1E-9A33-5B1D6C1A9E01</key>
+		<dict>
+			<key>Network</key>
+			<dict>
+				<key>Global</key>
+				<dict>
+					<key>IPv4</key>
+					<dict>
+						<key>ServiceOrder</key>
+						<array>
+							<string>5D1F0C7E-2B34-4C86-9C15-8E4A7D3B6F02</string>
+						</array>
+					</dict>
+				</dict>
+				<key>Service</key>
+				<dict>
+					<key>5D1F0C7E-2B34-4C86-9C15-8E4A7D3B6F02</key>
+					<dict>
+						<key>__LINK__</key>
+						<string>/NetworkServices/5D1F0C7E-2B34-4C86-9C15-8E4A7D3B6F02</string>
+					</dict>
+				</dict>
+			</dict>
+			<key>UserDefinedName</key>
+			<string>Automatic</string>
+		</dict>
+	</dict>
+	<key>System</key>
+	<dict>
+		<key>Network</key>
+		<dict>
+			<key>HostNames</key>
+			<dict>
+				<key>LocalHostName</key>
+				<string>iPhone</string>
+			</dict>
+		</dict>
+		<key>System</key>
+		<dict>
+			<key>ComputerName</key>
+			<string>iPhone</string>
+			<key>ComputerNameEncoding</key>
+			<integer>0</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>

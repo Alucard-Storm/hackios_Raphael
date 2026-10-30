@@ -59,6 +59,7 @@ __pycache__/
 !/userland/*.py
 !/userland/rc.*
 !/userland/com.hakios.*.plist
+!/userland/network.preferences.plist
 !/userland/src/
 !/userland/libmini/
 !/userland/var/

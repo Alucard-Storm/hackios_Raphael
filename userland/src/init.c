@@ -1106,6 +1106,29 @@ restore_var(void)
 	}
 }
 
+/*
+ * The network configuration of a phone that has had its first boot: a Wi-Fi service for en0 by DHCP
+ * (userland/network.preferences.plist, in the image only for a phone with a radio of its own). Nothing in
+ * this system makes one, and without it configd has no service to configure the radio's interface by: it
+ * stays down however well the link is up, and the system has no network. A configuration already in
+ * /private/var (a data volume kept from an earlier boot) is not touched.
+ */
+static void
+seed_network_prefs(void)
+{
+	static const char dir[] = "/private/var/preferences/SystemConfiguration";
+	static const char file[] = "/private/var/preferences/SystemConfiguration/preferences.plist";
+	const char *source = in_image("/etc/network.preferences.plist");
+	struct stat st;
+
+	if (stat(source, &st) != 0 || stat(file, &st) == 0) {
+		return;
+	}
+	mkdir(dir, 0755);
+	chown(dir, 0, 0);
+	check(copy_file(source, file, 0644, 0, 0), "a Wi-Fi network service for en0 (DHCP) in the network configuration");
+}
+
 static int
 count_entries(const char *path)
 {
@@ -1548,6 +1571,7 @@ main(int argc, char **argv, char **envp)
 	show_system();
 	mount_writable();
 	restore_var();
+	seed_network_prefs();
 	test_files();
 	test_writable();
 	test_memory();

@@ -4,24 +4,25 @@
 <dict>
 	<key>Label</key>
 	<string>com.hakios.wifi</string>
-	<!-- The Redmi K20 Pro's version of the job (build.sh picks it for DEVICE=raphael): after the radio's interface is
-	     configured it waits for you to join a network in Settings, then says the address, and whether a name resolves,
-	     a TCP connection opens and an HTTPS page comes, so that a join that does not finish says where it stopped.
-	     with wifi=1 among the kernel's arguments: has configd configure the radio's interface (src/net_test.m,
-	     "wifi"); without, it ends at once -->
+	<!-- The Redmi K20 Pro's version of the job (build.sh picks it for DEVICE=raphael). It does not configure the
+	     interface itself (no "wifi" step): a few minutes into the run, after you have joined a network in Settings, it
+	     says what the system did on its own: the addresses, configd's dynamic store, what SCNetworkReachability says,
+	     a lookup and an HTTPS fetch. -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>/redwood/bin/net_test</string>
-		<string>wifi</string>
-		<string>waitaddr</string>
-		<string>en0</string>
-		<string>400</string>
+		<string>wait</string>
+		<string>200</string>
 		<string>show</string>
+		<string>store</string>
+		<string>reach</string>
+		<string>www.apple.com</string>
+		<string>reach</string>
+		<string>example.com</string>
+		<string>reach</string>
+		<string>8.8.8.8</string>
 		<string>resolve</string>
-		<string>example.com</string>
-		<string>tcp</string>
-		<string>example.com</string>
-		<string>80</string>
+		<string>www.apple.com</string>
 		<string>fetch</string>
 		<string>https://www.apple.com/library/test/success.html</string>
 	</array>

@@ -545,9 +545,14 @@ wrongjoin(void)
 	close(s);
 }
 
+/* A job that waits (a join in Settings, an address) is idle to iOS, which ends such a process under memory pressure
+ * (JETSAM_REASON_MEMORY_IDLE_EXIT) before the answer is in: an open transaction says it is at work. */
+extern void xpc_transaction_begin(void);
+
 int
 main(int argc, char **argv)
 {
+	xpc_transaction_begin();
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	@autoreleasepool {
 		for (int i = 1; i < argc; i++) {
