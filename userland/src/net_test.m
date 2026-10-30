@@ -16,6 +16,8 @@
  *                         title if there is one, and the answer's own "x-" headers -- where Apple's
  *                         services say what they decided (X-Set-Apple-Store-Front; rc.jobs.store)
  *   reach NAME            what SCNetworkReachability says: the question applications ask first
+ *   nwpath SECONDS        what Network.framework's path monitor says for so long (the modern apps' question)
+ *   ftype IF              the kernel's functional type of IF (3: Wi-Fi)
  *   wait SECONDS
  *   wifi                  what the job com.hakios.wifi runs in every image: if the kernel was
  *                         started with wifi=1, wait for the radio's interface (en0) to appear,
@@ -46,6 +48,8 @@
  */
 #import <Foundation/Foundation.h>
 #include <SystemConfiguration/SCNetworkReachability.h>
+#import <Network/Network.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <ifaddrs.h>
@@ -371,6 +375,60 @@ reach(const char *name)
 }
 
 /*
+ * What Network.framework says: the path monitor's updates, which is how the apps that ask "am I online?" the
+ * modern way (Music, Weather, ...) hear of the network. For SECONDS it says each update: whether the path is
+ * satisfied, which kinds of interface it uses, whether it is expensive or constrained, and the interfaces.
+ */
+static void
+nwpath(double limit)
+{
+	dispatch_queue_t queue = dispatch_queue_create("net_test.nwpath", DISPATCH_QUEUE_SERIAL);
+	nw_path_monitor_t monitor = nw_path_monitor_create();
+	__block int updates = 0;
+
+	nw_path_monitor_set_queue(monitor, queue);
+	nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+		nw_path_status_t status = nw_path_get_status(path);
+		__block NSMutableString *names = [NSMutableString string];
+
+		nw_path_enumerate_interfaces(path, ^bool(nw_interface_t interface) {
+			[names appendFormat:@" %s(type %d)", nw_interface_get_name(interface), (int)nw_interface_get_type(interface)];
+			return true;
+		});
+		printf("net_test: nwpath update %d: %s; wifi %d, wired %d, cellular %d, loopback %d, other %d; expensive %d, constrained %d, "
+		    "ipv4 %d, ipv6 %d, dns %d;%s\n", ++updates, status == nw_path_status_satisfied ? "SATISFIED" :
+		    status == nw_path_status_unsatisfied ? "UNSATISFIED" : status == nw_path_status_satisfiable ? "satisfiable" : "invalid",
+		    nw_path_uses_interface_type(path, nw_interface_type_wifi), nw_path_uses_interface_type(path, nw_interface_type_wired),
+		    nw_path_uses_interface_type(path, nw_interface_type_cellular), nw_path_uses_interface_type(path, nw_interface_type_loopback),
+		    nw_path_uses_interface_type(path, nw_interface_type_other), nw_path_is_expensive(path), nw_path_is_constrained(path),
+		    nw_path_has_ipv4(path), nw_path_has_ipv6(path), nw_path_has_dns(path), [names UTF8String]);
+	});
+	nw_path_monitor_start(monitor);
+	usleep((useconds_t)(limit * 1e6));
+	nw_path_monitor_cancel(monitor);
+	printf("net_test: nwpath: %d updates in %.0f s\n", updates, limit);
+}
+
+/* The kernel's own name for the kind of interface (SIOCGIFFUNCTIONALTYPE: 1 loopback, 2 wired, 3 Wi-Fi, 4 AWDL, 5 cellular...) */
+static void
+ftype(const char *name)
+{
+	struct ifreq request;
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+
+	memset(&request, 0, sizeof(request));
+	strlcpy(request.ifr_name, name, sizeof(request.ifr_name));
+	if (s < 0 || ioctl(s, _IOWR('i', 173, struct ifreq), &request) != 0) {
+		printf("net_test: ftype %s: %s\n", name, strerror(errno));
+	} else {
+		printf("net_test: ftype %s: functional type %u\n", name, *(uint32_t *)&request.ifr_ifru);
+	}
+	if (s >= 0) {
+		close(s);
+	}
+}
+
+/*
  * With wifi=1 among the kernel's arguments: wait for en0, and for configd's own network service for
  * it ("Wi-Fi", made of the radio's IOKit objects, drivers/wifi/hakios.wlan.cpp). That service runs
  * DHCP by itself, and it has to be the one that does: wifid takes the interface for usable only
@@ -585,6 +643,10 @@ main(int argc, char **argv)
 				reach(argv[++i]);
 			} else if (strcmp(step, "wait") == 0 && i + 1 < argc) {
 				usleep((useconds_t)(atof(argv[++i]) * 1e6));
+			} else if (strcmp(step, "nwpath") == 0 && i + 1 < argc) {
+				nwpath(atof(argv[++i]));
+			} else if (strcmp(step, "ftype") == 0 && i + 1 < argc) {
+				ftype(argv[++i]);
 			} else if (strcmp(step, "wifi") == 0) {
 				wifi();
 			} else if (strcmp(step, "watch") == 0 && i + 1 < argc) {
