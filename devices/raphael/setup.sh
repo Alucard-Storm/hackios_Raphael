@@ -8,8 +8,15 @@
 #   --secs N        how long iOS runs before the phone goes back to the loader (default: device.conf)
 #   --size GiB      size of the image file made inside Android's /data, once (default 16)
 #   --no-persist    boot from RAM only: nothing is kept between boots, and Android's /data is not touched
+#   --no-wifi       leave the Wi-Fi out (no modem firmware, no phone-private modem files in the image)
 #   --rebuild       build the kernel, loader and system image again even if they exist
 #   --yes           do not ask before the big downloads and before making the image file
+#
+# Wi-Fi (on unless --no-wifi): the radio is inside the modem, so the image carries the modem's firmware and this phone's own
+# modem files (its non-volatile partitions, which hold its identity: they come from your phone, stay on your PC and in the
+# image, and are never to be shared); the first run downloads the sources of the Wi-Fi driver (about 0.5 GB) and builds it.
+# Join a network in iOS's Settings once it is up. What does not work with it: apps that need Apple's account, store, location
+# or cellular services (App Store, Music, Weather: they say they are offline), which this system does not have.
 #
 # What it needs: a Linux PC; the phone with USB debugging, an unlocked bootloader and root (KernelSU)
 # on its Android, on a USB cable. Nothing is flashed. The image file (--size) is one fully allocated
@@ -20,13 +27,14 @@ set -u
 cd "$(dirname "$0")/../.." || exit 1
 export DEVICE=raphael
 
-SIZE_GIB=16 SECS= PERSIST=1 CHECK=0 REBUILD=0 YES=0
+SIZE_GIB=16 SECS= PERSIST=1 WIFI=1 CHECK=0 REBUILD=0 YES=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--check) CHECK=1 ;;
 	--secs) SECS=${2:?--secs N}; shift ;;
 	--size) SIZE_GIB=${2:?--size GiB}; shift ;;
 	--no-persist) PERSIST=0 ;;
+	--no-wifi) WIFI=0 ;;
 	--rebuild) REBUILD=1 ;;
 	--yes|-y) YES=1 ;;
 	-h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -114,7 +122,13 @@ else
 	todo "iOS 16.5 files (make fetch)"
 fi
 
-if [ -d fw-gpu ] && [ -d fw-audio ]; then
+wifi_inputs_there() {
+	for f in wlanmdsp.mbn firmware-5.bin 0-rmtfs-ram bdf bd_f11gl.bin bd_f11cn.bin nv-modemst1 nv-modemst2 nv-fsg nv-fsc; do
+		[ -s "fw-wifi/$f" ] || return 1
+	done
+	[ -s fw-modem/modem.mdt ]
+}
+if [ -d fw-gpu ] && [ -d fw-audio ] && { [ $WIFI = 0 ] || wifi_inputs_there; }; then
 	ok "the phone's firmware (fw-*/)"
 else
 	todo "the phone's firmware (pulled from your own Android)"
@@ -124,7 +138,19 @@ else
 	fi
 fi
 
-if [ -f "$KERNEL" ] && [ $REBUILD = 0 ]; then
+ATH10K=xnu-deps/build/ath10k/out/ath10k.o
+if [ $WIFI = 1 ]; then
+	if [ -f $ATH10K ] && [ $REBUILD = 0 ]; then
+		ok "Wi-Fi driver object"
+	elif [ $CHECK = 1 ] || ask "download the Wi-Fi driver's sources (about 0.5 GB: Linux, FreeBSD's LinuxKPI, wpa_supplicant, mbedTLS) and build it?"; then
+		do_step "building the Wi-Fi driver (tools/mk-ath10k.py)" python3 tools/mk-ath10k.py
+		[ $CHECK = 1 ] || rm -f "$KERNEL"           # the kernel has to be linked with it
+	else
+		die "no Wi-Fi driver: run again with --no-wifi, or let it build it"
+	fi
+fi
+kernel_has_wifi() { strings -a "$KERNEL" | grep -q "ath10k"; }
+if [ -f "$KERNEL" ] && [ $REBUILD = 0 ] && { [ $WIFI = 0 ] || kernel_has_wifi; }; then
 	ok "kernel"
 else
 	# make ends with errors about symbol sets that are harmless: what counts is the kernel file
@@ -138,11 +164,15 @@ else
 	do_step "building the loader" make loader DEVICE=raphael
 fi
 
-if [ -f userland/system.apfs ] && [ $REBUILD = 0 ]; then
-	ok "system image (userland/system.apfs)"
+RECIPE="wifi=$WIFI"
+if [ -f userland/system.apfs ] && [ $REBUILD = 0 ] && [ "$(cat userland/system.apfs.recipe 2>/dev/null)" = "$RECIPE" ]; then
+	ok "system image (userland/system.apfs, $RECIPE)"
 else
 	# exactly this recipe: a different one (PREBUILT=1, your own RC_JOBS) gives an iOS without wallpaper, sound or buttons
-	do_step "building the system image (about 20 minutes)" env GL=1 SYSTEM=1 REST=1 userland/build.sh
+	image_env=(GL=1 SYSTEM=1 REST=1)
+	[ $WIFI = 1 ] && image_env+=(MODEM=1 MPSS_WIFI=1)
+	build_image() { env "${image_env[@]}" userland/build.sh && echo "$RECIPE" > userland/system.apfs.recipe; }
+	do_step "building the system image (about 20 minutes)" build_image
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -186,6 +216,9 @@ SECS=${SECS:-$(conf PHONE_SECS)}
 ARGS="$(conf BASE_ARGS) $(conf PHONE_ARGS)"
 if [ $PERSIST = 1 ]; then
 	ARGS="$ARGS ufs_write=1 var_store=1 var_store_dev=hakios"
+fi
+if [ $WIFI = 1 ]; then
+	ARGS="$ARGS wifi=1 wifi_bdf=$(cat fw-wifi/bdf)"
 fi
 echo "   $SECS s, arguments: $ARGS"
 entered=0

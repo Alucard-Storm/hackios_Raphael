@@ -1,7 +1,7 @@
 # Device: Redmi K20 Pro (raphael)
 
-**Status: iOS 16.5 boots from RAM to the home screen on this phone, with touch, buttons, vibration, sound, the GPU, tear-free scanout, CPU frequency scaling and battery readout.** Nothing is
-flashed; the phone goes back to Android after a restart. The first phone, `devices/poco-x5-pro/`, is the
+**Status: iOS 16.5 boots to the home screen on this phone, with touch, buttons, vibration, sound, the GPU, tear-free scanout, CPU frequency scaling, battery readout, Wi-Fi, and its data kept between boots.** Nothing is
+flashed and Android stays bootable; iOS runs from RAM and keeps its data in one image file inside Android's `/data`. The first phone, `devices/poco-x5-pro/`, is the
 worked example. The sections below are the notes in the order they were found.
 
 | What | State |
@@ -18,12 +18,21 @@ worked example. The sections below are the notes in the order they were found.
 | GPU (Adreno 640) | works in iOS (`gpu=1`): Mesa 25.0.7 FD640, tiled rendering clean with `GMEM_BASE 0x100000`; one SMMU fault at teardown (addr 0x1600) unexplained |
 | Display | tear-free: command-mode DSI with TE scanout and page flips (`fb_scan=1`) |
 | CPU frequency | OSM scaling with touch boost (`cpufreq=1`) |
-| Wi-Fi, cellular, earpiece, microphones, headphones, cameras | not done (the Wi-Fi chip lives inside the modem; an unstable ath10k attempt is on branch `backup-wifi-commits`) |
-| Persistence | none: the image lives in RAM and is uploaded every run (~90 s, 2.4 GB); booting from `userdata` is a deferred idea |
+| Wi-Fi | works: scans, joins (WPA2, WPA3), DHCP, DNS, Safari and apps that connect themselves. The radio is an ath10k WCN3998 inside the modem (`wifi=1`). App Store, Music and Weather still say offline: Apple services missing from the image (see Wi-Fi below) |
+| Cellular, earpiece, microphones, headphones, cameras | not done |
+| Persistence | works: `/private/var` is saved into a pinned image file inside Android's `/data` and restored at the next boot; the system image is kept there too, so a boot needs no 2.4 GB upload (see Storage below) |
 
 ## Quick start
 
-On Linux, with the phone on adb (KernelSU `su`) and the bootloader unlocked:
+On Linux, with the phone on adb (KernelSU `su`) and the bootloader unlocked, one script sets up whatever is missing and boots iOS
+(a second run only boots; `--help` lists the options, `--check` only reports):
+
+```sh
+devices/raphael/setup.sh
+```
+
+It downloads the iOS 16.5 files, pulls the phone's firmware, builds the kernel, loader, Wi-Fi driver and system image,
+makes the image file in `/data` (16 GiB, once) and boots. The steps by hand:
 
 ```sh
 devices/raphael/pull-soc.sh                     # device tree and soc.args (kept in the repository already)
@@ -39,6 +48,7 @@ tools/logdump.sh                                # after rebooting to Android: th
 - No `-v`: the screen shows the Silicium logo for the whole run; that is normal. Do not hold Power.
 - Keep runs short: there is no thermal control yet (`PHONE_SECS=300` in `run.conf`).
 - Build the image with exactly `GL=1 SYSTEM=1 REST=1 userland/build.sh` (not `PREBUILT=1`, no custom `RC_JOBS`). `devices/raphael/raphael.jobs` is a hardware-test job list: an image built with it boots without wallpaper, buttons or sound.
+- `xl reboot` is allowed during a run and restarts the phone: do not use it to wait out a run.
 - Never start a run while the previous one is on the phone; a premature launch leaves the loader refusing uploads ("no memory window") until `xl reboot`.
 - A run from a fresh boot differs from one from the loader (Android leaves the GPU zap shader loaded in TrustZone).
 - The loader no longer writes the `logdump` partition on raphael (`persist_logs`, commit `cb540f1`), so a hung run loses its log.
@@ -367,3 +377,50 @@ when the kernel hands back to the loader, `xl` ignoring an empty `result:` answe
 RX FIFO drain, touch boost for cpufreq, GMEM base. Not taken: their second touch driver
 (`raphael_touch.c`), the `userdata` write path in `hakios.ufs.c` (persistence, deferred), Wi-Fi.
 Verified on the phone with `make phone`: ~980 s, no panic, wallpaper, buttons, sound, vibration, no tearing.
+
+## Storage: an image file inside Android's /data (2026-10-30)
+
+Android stays bootable, so nothing is written to a partition it uses. iOS gets one file, `/data/local/hakios/ios.img`
+(`tools/android/hakios-img create`: fully allocated and pinned in f2fs so that Android never moves its blocks). `/data` is
+encrypted below the filesystem (metadata encryption, hardware-wrapped key), so the file's contents are not readable from
+Android and need not be: the loader reads and writes its raw blocks, whose addresses `hakios-img extents` lists.
+
+- `xl imgscan` reads the extents from Android; `xl img hakios logs/ios.ext` gives them to the loader, with the identity of the
+  backing partition (`userdata`: GUID and range, read by `xl parts`), and the loader shows the file to the kernel as a partition
+  of its own, `/dev/rufs_hakios`, reachable nowhere beyond the file. `xl imgtest` writes, reads back and restores patterns.
+- The data volume: `var_store=1 var_store_dev=hakios ufs_write=1` (`userland/src/var_store.c`) packs `/private/var` into
+  the first 4 GiB of the file at the end of a run and unpacks it at boot.
+- The system image: `xl ramdisk userland/system.apfs` once, then `xl rdsave` copies it into the file (from 4 GiB on, verified,
+  header last); afterwards `xl rdload` brings it back into RAM in about 17 s (CRC checked), and `xl run` needs no upload.
+- Delete the file to take the 16 GiB back. A sparse file does not work: the loader needs real blocks at fixed addresses.
+- A long command must not be followed by another `xl` call that re-enters the loader (the loader is busy, looks like
+  fastboot, and a re-entry reboots it and loses the work): `rd*` commands wait up to 10 minutes.
+
+## Wi-Fi (2026-10-30)
+
+Most of the driver is HeliumStudio-Dev's (their `raphael-bringup`; their commit keeps its author here). What we found and added:
+
+- The radio (WCN3998, ath10k over the modem's SNOC) starts the modem (PAS 4) and talks to it over QRTR/RMTFS/TFTP. Inputs, all
+  from your own phone by `pull-firmware.sh`: the modem firmware (`fw-modem/`), `wlanmdsp.mbn`, the board data for the unit
+  (`bd_f11cn.bin` for `ro.boot.hwc=CN`, else `bd_f11gl.bin`; recorded in `fw-wifi/bdf`), and raw copies of the partitions
+  modemst1, modemst2, fsg, fsc (`fw-wifi/nv-*`: they hold the phone's identity; never share them or an image made with them).
+  `MODEM=1 MPSS_WIFI=1 userland/build.sh` puts them into the system image (`MPSS_WIFI` refuses with `SHARE` set).
+- The modem's file service needs 3 MB below 4 GiB, which the kernel's RAM (a bank above it) is not: the loader reserves a pool in
+  its own memory and passes `rmtfs_pool_pa=`. Without it the bring-up stopped silently before the modem started.
+- The kernel's Apple80211 shim answers what `wifid` asks after a join: country code, PHY mode, rate, noise, MCS, deauth reason,
+  and takes the settings it sends (365, 383, 419, 422).
+- configd made no network service for `en0` by itself, so the interface stayed down: `userland/network.preferences.plist` (a
+  Wi-Fi service by DHCP) is seeded into `/private/var/preferences/SystemConfiguration` by `init` when none is there. Then
+  Settings shows the tick and the address, and the status bar icon is right.
+- Boot arguments: `wifi=1 wifi_bdf=bd_f11gl.bin` (the defaults of the rest are in `hakios.wifi.c`). The kernel's command line
+  has room for 608 characters: a long argument list gets cut at the end.
+- Known: the first join sometimes ends after a minute with a half handshake (iOS then tries again); toggling Wi-Fi off and on
+  was reported to break scanning on Helium's phone and was not tried here.
+- Not working: App Store, Music and Weather say they are offline. The network is fine for them (SCNetworkReachability, a
+  Network.framework path monitor: satisfied, Wi-Fi, not expensive; DNS and HTTPS work) but the services they ask for first are
+  not in the image: fairplayd, locationd, commcenter, identityservicesd, kvsd, mobileassetd, storeservicesd, and accountsd and
+  itunesstored cannot be found. CoreTelephony answers (cellular data not restricted).
+- Diagnostics: `WIFI_DIAG=1` in the image build makes the Wi-Fi job (`userland/com.hakios.wifi.raphael.plist`) report after
+  200 s: addresses, configd's dynamic store, reachability, the kernel's functional type of `en0`, the path monitor, CoreTelephony
+  and which system services can be looked up (`net_test` steps `store`, `reach`, `ftype`, `nwpath`, `ct`, `services`).
+  The loader's live log keeps only the last 32 KB: read it with `xl log` within a minute of the report.
