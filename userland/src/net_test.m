@@ -18,6 +18,8 @@
  *   reach NAME            what SCNetworkReachability says: the question applications ask first
  *   nwpath SECONDS        what Network.framework's path monitor says for so long (the modern apps' question)
  *   ftype IF              the kernel's functional type of IF (3: Wi-Fi)
+ *   ct SECONDS            what CoreTelephony says: cellular data restriction state, the cellular providers
+ *   services              whether the system services the failing apps ask for can be looked up
  *   wait SECONDS
  *   wifi                  what the job com.hakios.wifi runs in every image: if the kernel was
  *                         started with wifi=1, wait for the radio's interface (en0) to appear,
@@ -49,6 +51,11 @@
 #import <Foundation/Foundation.h>
 #include <SystemConfiguration/SCNetworkReachability.h>
 #import <Network/Network.h>
+#import <CoreTelephony/CTCellularData.h>
+#import <CoreTelephony/CTTelephonyNetworkInfo.h>
+/* (the SDK has no servers/bootstrap.h) */
+extern mach_port_t bootstrap_port;
+extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -429,6 +436,46 @@ ftype(const char *name)
 }
 
 /*
+ * What CoreTelephony says, which the apps that gate on "may I use the network, and which kind" read: the
+ * restriction state of cellular data (0 unknown, 1 restricted, 2 not restricted), and the cellular providers.
+ */
+static void
+ct(double limit)
+{
+	CTCellularData *data = [[CTCellularData alloc] init];
+	CTTelephonyNetworkInfo *info = [[CTTelephonyNetworkInfo alloc] init];
+
+	data.cellularDataRestrictionDidUpdateNotifier = ^(CTCellularDataRestrictedState state) {
+		printf("net_test: ct: the cellular data restriction state changed to %d\n", (int)state);
+	};
+	printf("net_test: ct: cellular data restriction state %d (0 unknown, 1 restricted, 2 not restricted)\n", (int)data.restrictedState);
+	printf("net_test: ct: %lu cellular providers, radio access technologies: %s\n",
+	    (unsigned long)[info.serviceSubscriberCellularProviders count], [[info.serviceCurrentRadioAccessTechnology description] UTF8String]);
+	usleep((useconds_t)(limit * 1e6));
+	printf("net_test: ct: after %.0f s, cellular data restriction state %d\n", limit, (int)data.restrictedState);
+}
+
+/* Whether the system services the failing apps ask for can be found at all (bootstrap_look_up) */
+static void
+services(void)
+{
+	static const char *const names[] = { "com.apple.commcenter.xpc", "com.apple.commcenter.coretelephony.xpc", "com.apple.fairplayd",
+		"com.apple.fairplayd.versioned", "com.apple.locationd.registration", "com.apple.locationd.synchronous", "com.apple.kvsd",
+		"com.apple.mobilegestalt.xpc", "com.apple.nsurlsessiond", "com.apple.networkd", "com.apple.symptomsd", "com.apple.accountsd",
+		"com.apple.itunesstored", "com.apple.appstored.xpc", "com.apple.mobileassetd.v2", "com.apple.identityservicesd.embedded.auth" };
+
+	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		mach_port_t port = MACH_PORT_NULL;
+		kern_return_t kr = bootstrap_look_up(bootstrap_port, names[i], &port);
+
+		printf("net_test: service %s: %s (%#x)\n", names[i], kr == KERN_SUCCESS ? "found" : "NOT FOUND", kr);
+		if (port != MACH_PORT_NULL) {
+			mach_port_deallocate(mach_task_self(), port);
+		}
+	}
+}
+
+/*
  * With wifi=1 among the kernel's arguments: wait for en0, and for configd's own network service for
  * it ("Wi-Fi", made of the radio's IOKit objects, drivers/wifi/hakios.wlan.cpp). That service runs
  * DHCP by itself, and it has to be the one that does: wifid takes the interface for usable only
@@ -645,6 +692,10 @@ main(int argc, char **argv)
 				usleep((useconds_t)(atof(argv[++i]) * 1e6));
 			} else if (strcmp(step, "nwpath") == 0 && i + 1 < argc) {
 				nwpath(atof(argv[++i]));
+			} else if (strcmp(step, "ct") == 0 && i + 1 < argc) {
+				ct(atof(argv[++i]));
+			} else if (strcmp(step, "services") == 0) {
+				services();
 			} else if (strcmp(step, "ftype") == 0 && i + 1 < argc) {
 				ftype(argv[++i]);
 			} else if (strcmp(step, "wifi") == 0) {

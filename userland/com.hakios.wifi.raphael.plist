@@ -23,8 +23,11 @@
 		<string>8.8.8.8</string>
 		<string>ftype</string>
 		<string>en0</string>
+		<string>services</string>
+		<string>ct</string>
+		<string>6</string>
 		<string>nwpath</string>
-		<string>20</string>
+		<string>8</string>
 		<string>resolve</string>
 		<string>www.apple.com</string>
 		<string>fetch</string>
