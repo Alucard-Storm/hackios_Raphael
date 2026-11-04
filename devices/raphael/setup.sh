@@ -5,7 +5,7 @@
 #   devices/raphael/setup.sh              set up what is missing, then boot iOS (about 5 minutes)
 #   devices/raphael/setup.sh --check      only say what is there and what is missing; changes nothing
 #
-#   --secs N        how long iOS runs before the phone goes back to the loader (default: device.conf)
+#   --secs N        how long iOS runs before the phone goes back to the loader (default: run.conf)
 #   --size GiB      size of the image file made inside Android's /data, once (default 16)
 #   --no-persist    boot from RAM only: nothing is kept between boots, and Android's /data is not touched
 #   --no-wifi       leave the Wi-Fi out (no modem firmware, no phone-private modem files in the image)
@@ -45,7 +45,7 @@ done
 
 IMG_PATH=/data/local/hakios/ios.img
 KERNEL=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
-conf() { sed -n "s/^$1=//p" devices/raphael/device.conf; }
+conf() { sed -n "s/^$1=//p" devices/raphael/run.conf; }
 say() { printf '\n== %s\n' "$*"; }
 ok() { printf '   [ok]      %s\n' "$*"; }
 todo() { printf '   [missing] %s\n' "$*"; }

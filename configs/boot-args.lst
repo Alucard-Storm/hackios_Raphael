@@ -9,6 +9,8 @@ adreno_return	k
 adreno_skip	k
 adreno_speed	k
 adreno_stream1	k
+adreno_tiling	k
+adreno_vote_first	k
 adreno_watch	k
 adsp	k
 adsp_again	k
@@ -98,6 +100,7 @@ fb_hz	k
 fb_measure	k
 fb_pri	k
 fb_queue	k
+fb_scan	k
 fb_threads	k
 fbheight	k
 fbscale	k
@@ -149,6 +152,7 @@ gpu_log	k
 hakios_kver	k
 haptic	k
 haptic_effect	k
+haptic_ms	k
 hv_wdt_pet	k
 loader_return_after	kl
 m2v_utrace	u
@@ -235,6 +239,7 @@ rec_step	k
 regtrace	k
 return_cpu	k
 return_panic	k
+rmtfs_pool_pa	k
 root_apfs	u
 sb_delay	u
 serial	l
@@ -268,6 +273,7 @@ switcher_wallpaper	u
 syssleep	k
 systrace	k
 systrace_name	k
+tfa	k
 thermal	k
 thermal_log	k
 thermal_poll	k
@@ -315,11 +321,13 @@ virtio_net	k
 virtio_sound	k
 wallpaper_cache	u
 wallpaper_freeze	u
-wifi	k
+wifi	kl
 wifi_again	k
 wifi_ask	k
 wifi_ba	k
+wifi_bdf	k
 wifi_cal	k
+wifi_diag	k
 wifi_dirty	k
 wifi_file	k
 wifi_fine	k
@@ -335,6 +343,7 @@ wifi_mac	k
 wifi_mission	k
 wifi_new	k
 wifi_pause	k
+wifi_pdr	k
 wifi_quiet	k
 wifi_radio_read	k
 wifi_ready	k
@@ -342,7 +351,7 @@ wifi_return	k
 wifi_scan	k
 wifi_smmu	k
 wifi_station	k
-wifi_step	k
+wifi_step	kl
 wifi_wait	k
 wifi_watch	k
 wifi_wide	k

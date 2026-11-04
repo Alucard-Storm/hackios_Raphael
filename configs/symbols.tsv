@@ -9,6 +9,8 @@ ADRENO_RETURN	arg	adreno_return	GPU and display	k	hakios.adreno.c	when all is ov
 ADRENO_SKIP	arg	adreno_skip	GPU and display	k	hakios.adreno.c	leave out the steps whose bits are set (bit 2 = step 2)
 ADRENO_SPEED	arg	adreno_speed	GPU and display	k	hakios.adreno.c	step 17 asks the GMU for the 3D core's Nth speed: 1 315 MHz, 2 450 MHz, 3 550 MHz (the default: the most this phone's GPU is rated for)
 ADRENO_STREAM1	arg	adreno_stream1	GPU and display	k	hakios.adreno.c	step 18 leaves the core's second stream out (0) or gives it an empty context of its own (2): what the SMMU then records shows what the core
+ADRENO_TILING	arg	adreno_tiling	GPU and display	k	hakios.adreno.c	
+ADRENO_VOTE_FIRST	arg	adreno_vote_first	GPU and display	k	hakios.adreno.c	
 ADRENO_WATCH	arg	adreno_watch	GPU and display	k	hakios.adreno.c	after the last step, say once a second for S seconds (default 20) that the machine is still alive, and what was written last
 ADSP_AGAIN	arg	adsp_again	Audio and battery	k	hakios.adsp.c	
 ADSP_APR_WAIT	arg	adsp_apr_wait	Audio and battery	k	hakios.adsp.c	
@@ -89,6 +91,7 @@ FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp
 FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how often the panel is really refreshed
 FB_PRI	arg	fb_pri	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_QUEUE	arg	fb_queue	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_SCAN	arg	fb_scan	User space	k	hakios.display.c	
 FB_THREADS	arg	fb_threads	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBHEIGHT	arg	fbheight	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x 812 points drawn at two pixels a point instead of three
@@ -137,6 +140,7 @@ GPU_EXACT	arg	gpu_exact	GPU and display	k	hakios.adreno.c
 GPU_KEEP	arg	gpu_keep	GPU and display	k	hakios.gpu.cpp	
 GPU_LOG	arg	gpu_log	GPU and display	k	hakios.adreno.c	
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
+HAPTIC_MS	arg	haptic_ms	User space	k	hakios.haptic_pmic.c	
 M2V_UTRACE	arg	m2v_utrace	User space	u	HakiosMetalCA.m	Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	
@@ -214,6 +218,7 @@ REC_STEP	arg	rec_step	GPU and display	k	MiniIOMobileFramebuffer.cpp
 REGTRACE	arg	regtrace	CPU, memory and boot	k	(patch)	
 RETURN_CPU	arg	return_cpu	CPU, memory and boot	k	loader_return.c	
 RETURN_PANIC	arg	return_panic	CPU, memory and boot	k	loader_return.c	
+RMTFS_POOL_PA	hex	rmtfs_pool_pa	Wi-Fi	k	hakios.wifi.c	
 ROOT_APFS	arg	root_apfs	User space	u	init.c	the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
 SERIAL	arg	serial	Loader	l	loader.c	
 SMALL_CORES	arg	small_cores	CPU, memory and boot	k	(patch)	
@@ -244,15 +249,16 @@ SWITCHER_WALLPAPER	arg	switcher_wallpaper	User space	u	inject_sb.c
 SYSSLEEP	arg	syssleep	CPU, memory and boot	k	(patch)	
 SYSTRACE	arg	systrace	CPU, memory and boot	k	(patch),user_exception_trace.c	
 SYSTRACE_NAME	arg	systrace_name	CPU, memory and boot	k	(patch)	
+TFA	arg	tfa	User space	k	hakios.speaker_tfa.c	
 THERMAL_LOG	arg	thermal_log	Chip, thermal and PMIC	k	hakios.thermal.c	a summary line this often (0: only on a rise; 60)
 THERMAL_TM0	arg	thermal_tm0	Chip, thermal and PMIC	k	hakios.thermal.c	
 THERMAL_TM1	arg	thermal_tm1	Chip, thermal and PMIC	k	hakios.thermal.c	
 TORCH	arg	torch	Haptics and torch	kl	hakios.torch.c,loader.c	a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its registers, the PMIC's temperature
 TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.torch.c	
 TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.torch.c	
-TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.goodix.c	
+TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.goodix.c,hakios.goodix_i2c.c	
 TOUCH_LAT	arg	touch_lat	GPU and display	ku	HakiosMetalCA.m,MiniIOMobileFramebuffer.cpp,eagl.c,hakios.goodix.c,hakios.gpu.cpp,hakios.input.c,inject.c,inject_sb.c	a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for telling apart what holds a frame up
-TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c	
+TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c,hakios.goodix_i2c.c	
 TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
 TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.goodix.c	the bus at N Hz (Android's device tree gives the chip 5 MHz)
 TU_DEBUG	arg	tu_debug	User space	u	HakiosMetalCA.m	Turnip's TU_DEBUG in the window server (sysmem, gmem, forcebin, ...)
@@ -285,7 +291,9 @@ WALLPAPER_FREEZE	arg	wallpaper_freeze	User space	u	inject_sb.c	the wallpaper as 
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	
+WIFI_BDF	arg	wifi_bdf	Wi-Fi	k	hakios.wifi.c	
 WIFI_CAL	arg	wifi_cal	Wi-Fi	k	hakios.wlfw.c	
+WIFI_DIAG	arg	wifi_diag	Wi-Fi	k	hakios.wifi.c	
 WIFI_DIRTY	arg	wifi_dirty	Wi-Fi	k	hakios.wifi.c	
 WIFI_FILE	arg	wifi_file	Wi-Fi	k	hakios.wifi.c	with wifi=1: the network of fw/network is not joined at the start
 WIFI_FINE	arg	wifi_fine	Wi-Fi	k	hakios.wifi.c	such a step waits like that before every single write and call
@@ -301,6 +309,7 @@ WIFI_MAC	arg	wifi_mac	Wi-Fi	k	hakios.wifi.c	the radio's own address for the driv
 WIFI_MISSION	arg	wifi_mission	Wi-Fi	k	hakios.wlfw.c	
 WIFI_NEW	arg	wifi_new	Wi-Fi	k	hakios.wifi.c	steps K and later have not been seen to work (default: the last one)
 WIFI_PAUSE	arg	wifi_pause	Wi-Fi	k	hakios.wifi.c	
+WIFI_PDR	arg	wifi_pdr	Wi-Fi	k	hakios.wifi.c	
 WIFI_QUIET	arg	wifi_quiet	Wi-Fi	k	lx_bus.c	
 WIFI_RADIO_READ	arg	wifi_radio_read	Wi-Fi	k	hakios.wifi.c	step 16 does read (2: whatever mode the firmware is in)
 WIFI_READY	arg	wifi_ready	Wi-Fi	k	hakios.wlfw.c	
@@ -308,7 +317,7 @@ WIFI_RETURN	arg	wifi_return	Wi-Fi	k	hakios.wifi.c	when all is over, go back to t
 WIFI_SCAN	arg	wifi_scan	Wi-Fi	k	lx_bus.c	
 WIFI_SMMU	arg	wifi_smmu	Wi-Fi	k	hakios.wifi.c	before any step: read what the boot chain has set up in the SMMU for the radio's stream (smmu_look() below; nothing is written)
 WIFI_STATION	arg	wifi_station	Wi-Fi	k	lx_bus.c	
-WIFI_STEP	arg	wifi_step	Wi-Fi	k	hakios.wifi.c	
+WIFI_STEP	arg	wifi_step	Wi-Fi	kl	hakios.wifi.c,loader.c	
 WIFI_WAIT	arg	wifi_wait	Wi-Fi	k	hakios.wifi.c	how long step 11 watches for the DSP to say that it is up (default 10)
 WIFI_WATCH	arg	wifi_watch	Wi-Fi	k	hakios.wifi.c	
 WIFI_WIDE	arg	wifi_wide	Wi-Fi	k	lx_80211.c	

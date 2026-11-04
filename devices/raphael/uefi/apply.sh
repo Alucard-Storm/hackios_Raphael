@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 MU=../../../Mu-Silicium
-POCO=../../poco-x5-pro/uefi
+POCO=../../redwood/uefi
 [ "$(cat BASE)" = "$(cat $POCO/BASE)" ] || { echo "uefi/apply.sh: BASE differs from the POCO port's; the hook patch is made on the other one"; exit 1; }
 [ -e $MU ] && { echo "uefi/apply.sh: $MU already exists"; exit 1; }
 git clone https://github.com/Project-Silicium/Mu-Silicium.git $MU

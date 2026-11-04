@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **349 arguments**: 278 read by the kernel, 14 by the loader, 67 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **358 arguments**: 287 read by the kernel, 16 by the loader, 67 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (76)
+## GPU and display (78)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -23,6 +23,8 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `adreno_skip` | K | `hakios.adreno.c` | `CONFIG_ADRENO_SKIP` |  |
 | `adreno_speed` | K | `hakios.adreno.c` | `CONFIG_ADRENO_SPEED` |  |
 | `adreno_stream1` | K | `hakios.adreno.c` | `CONFIG_ADRENO_STREAM1` |  |
+| `adreno_tiling` | K | `hakios.adreno.c` | `CONFIG_ADRENO_TILING` |  |
+| `adreno_vote_first` | K | `hakios.adreno.c` | `CONFIG_ADRENO_VOTE_FIRST` |  |
 | `adreno_watch` | K | `hakios.adreno.c` | `CONFIG_ADRENO_WATCH` |  |
 | `display_probe` | K | `hakios.adreno.c` | `CONFIG_DISPLAY_PROBE` |  |
 | `fb_beam` | K | `MiniIOMobileFramebuffer.cpp` | `CONFIG_FB_BEAM` |  |
@@ -95,15 +97,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 |---|---|---|---|---|
 | `privs` | K | `kern_minimac.c` | `CONFIG_PRIVS` |  |
 
-## Wi-Fi (31)
+## Wi-Fi (35)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `wifi` | K | `hakios.wifi.c` | `CONFIG_WIFI` |  |
+| `rmtfs_pool_pa` | K | `hakios.wifi.c` | `CONFIG_RMTFS_POOL_PA` |  |
+| `wifi` | KL | `hakios.wifi.c`, `loader.c` | `CONFIG_WIFI` |  |
 | `wifi_again` | K | `hakios.wifi.c` | `CONFIG_WIFI_AGAIN` |  |
 | `wifi_ask` | K | `hakios.wifi.c` | `CONFIG_WIFI_ASK` |  |
 | `wifi_ba` | K | `lx_80211.c` | `CONFIG_WIFI_BA` | implied by wifi=1 |
+| `wifi_bdf` | K | `hakios.wifi.c` | `CONFIG_WIFI_BDF` |  |
 | `wifi_cal` | K | `hakios.wlfw.c` | `CONFIG_WIFI_CAL` |  |
+| `wifi_diag` | K | `hakios.wifi.c` | `CONFIG_WIFI_DIAG` |  |
 | `wifi_dirty` | K | `hakios.wifi.c` | `CONFIG_WIFI_DIRTY` |  |
 | `wifi_file` | K | `hakios.wifi.c` | `CONFIG_WIFI_FILE` |  |
 | `wifi_fine` | K | `hakios.wifi.c` | `CONFIG_WIFI_FINE` |  |
@@ -119,6 +124,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_mission` | K | `hakios.wlfw.c` | `CONFIG_WIFI_MISSION` |  |
 | `wifi_new` | K | `hakios.wifi.c` | `CONFIG_WIFI_NEW` |  |
 | `wifi_pause` | K | `hakios.wifi.c` | `CONFIG_WIFI_PAUSE` |  |
+| `wifi_pdr` | K | `hakios.wifi.c` | `CONFIG_WIFI_PDR` |  |
 | `wifi_quiet` | K | `lx_bus.c` | `CONFIG_WIFI_QUIET` |  |
 | `wifi_radio_read` | K | `hakios.wifi.c` | `CONFIG_WIFI_RADIO_READ` |  |
 | `wifi_ready` | K | `hakios.wlfw.c` | `CONFIG_WIFI_READY` |  |
@@ -126,7 +132,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `wifi_scan` | K | `lx_bus.c` | `CONFIG_WIFI_SCAN` |  |
 | `wifi_smmu` | K | `hakios.wifi.c` | `CONFIG_WIFI_SMMU` | implied by wifi=1 (as 2) |
 | `wifi_station` | K | `lx_bus.c` | `CONFIG_WIFI_STATION` | implied by wifi=1 |
-| `wifi_step` | K | `hakios.wifi.c` | `CONFIG_WIFI_STEP` |  |
+| `wifi_step` | KL | `hakios.wifi.c`, `loader.c` | `CONFIG_WIFI_STEP` |  |
 | `wifi_wait` | K | `hakios.wifi.c` | `CONFIG_WIFI_WAIT` |  |
 | `wifi_watch` | K | `hakios.wifi.c` | `CONFIG_WIFI_WATCH` |  |
 | `wifi_wide` | K | `lx_80211.c` | `CONFIG_WIFI_WIDE` | implied by wifi=1 |
@@ -253,11 +259,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `buttons_steps` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_STEPS` |  |
 | `press_power` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER` |  |
 | `press_power_ms` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER_MS` |  |
-| `touch_flip` | K | `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
-| `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
+| `touch_flip` | K | `hakios.goodix.c`, `hakios.goodix_i2c.c` | `CONFIG_TOUCH_FLIP` |  |
+| `touch_poll_us` | K | `hakios.goodix.c`, `hakios.goodix_i2c.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
 | `touch_spi_hz` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPI_HZ` |  |
-| `touchscreen` | K | `hakios.buttons.c`, `hakios.goodix.c` | `CONFIG_TOUCHSCREEN` |  |
+| `touchscreen` | K | `hakios.buttons.c`, `hakios.goodix.c`, `hakios.goodix_i2c.c` | `CONFIG_TOUCHSCREEN` |  |
 | `virtio_input` | K | `hakios.virtio_input.c` | `CONFIG_VIRTIO_INPUT` |  |
 
 ## Storage and APFS (43)
@@ -320,7 +326,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `haptic` | K | `hakios.haptic.c` | `CONFIG_HAPTIC` |  |
+| `haptic` | K | `hakios.haptic.c`, `hakios.haptic_pmic.c` | `CONFIG_HAPTIC` |  |
 | `haptic_effect` | K | `hakios.haptic.c` | `CONFIG_HAPTIC_EFFECT` |  |
 | `torch` | KL | `hakios.torch.c`, `loader.c` | `CONFIG_TORCH` |  |
 | `torch_max_s` | K | `hakios.torch.c` | `CONFIG_TORCH_MAX_S` |  |
@@ -397,7 +403,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (35)
+## User space (38)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -409,11 +415,13 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
 | `caenv` | U | `inject.c`, `inject_sb.c` | `CONFIG_CAENV` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
+| `fb_scan` | K | `hakios.display.c` | `CONFIG_FB_SCAN` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
 | `glsb3` | U | `inject.c` | `CONFIG_GLSB3` |  |
 | `glyes` | U | `inject.c` | `CONFIG_GLYES` |  |
+| `haptic_ms` | K | `hakios.haptic_pmic.c` | `CONFIG_HAPTIC_MS` |  |
 | `m2v_utrace` | U | `HakiosMetalCA.m` | `CONFIG_M2V_UTRACE` |  |
 | `metal_all` | U | `HakiosMetalCA.m` | `CONFIG_METAL_ALL` |  |
 | `metal_defer` | U | `HakiosMetalCA.m` | `CONFIG_METAL_DEFER` |  |
@@ -430,6 +438,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
+| `tfa` | K | `hakios.speaker_tfa.c` | `CONFIG_TFA` |  |
 | `tu_debug` | U | `HakiosMetalCA.m` | `CONFIG_TU_DEBUG` |  |
 | `ui_lite` | U | `inject_sb.c` | `CONFIG_UI_LITE` |  |
 | `var_hfs` | U | `init.c` | `CONFIG_VAR_HFS` |  |
