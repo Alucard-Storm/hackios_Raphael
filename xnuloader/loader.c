@@ -1943,12 +1943,11 @@ block_tables(void)
 static int
 block_is_store(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
 {
-	static const efi_guid darwin_type = BLOCK_DARWIN_TYPE, darwin_uniq = BLOCK_DARWIN_UNIQ;
+	static const efi_guid darwin_type = BLOCK_DARWIN_TYPE;
 	const int granted = store_grant.set;
 	const char *name = granted ? store_grant.name : "darwin";
-	const efi_guid *uniq = granted ? &store_grant.uniq : &darwin_uniq;
-	uint64_t first = granted ? store_grant.first : BLOCK_DARWIN_FIRST;
-	uint64_t last = granted ? store_grant.last : BLOCK_DARWIN_LAST;
+	const efi_guid *uniq = &store_grant.uniq;
+	uint64_t first = store_grant.first, last = store_grant.last;
 	const char *why = NULL;
 
 	for (unsigned i = 0; i <= str_len(name); i++) {
@@ -1958,16 +1957,17 @@ block_is_store(const efi_partition_info *info, const efi_block_io *bio, const st
 	}
 	if (!granted && memcmp(&info->type_guid, &darwin_type, sizeof(darwin_type)) != 0) {
 		why = "its type GUID is not the one it had";
-	} else if (memcmp(&info->unique_guid, uniq, sizeof(*uniq)) != 0) {
+	} else if (granted && memcmp(&info->unique_guid, uniq, sizeof(*uniq)) != 0) {
 		why = "its unique GUID is not the one it had";
-	} else if (info->start_lba != first || info->end_lba != last) {
+	} else if (granted && (info->start_lba != first || info->end_lba != last)) {
 		why = "it does not begin and end where it did";
 	} else if (bp->unit != 0) {
 		/* the first unit UEFI lists: this firmware's device paths say no logical unit number
 		 * (device_path_print finds no 3.19 node), so bp->lun is 0xff for every unit */
 		why = "it is not on the first logical unit";
-	} else if (bp->block_size != 4096 || bp->blocks != last - first + 1) {
-		why = "its blocks are not what they were";
+	} else if (bp->block_size != 4096 || (granted ? bp->blocks != last - first + 1 :
+	    (bp->blocks < BLOCK_DARWIN_MIN || info->end_lba - info->start_lba + 1 != bp->blocks))) {
+		why = granted ? "its blocks are not what they were" : "it is not 20 GiB in blocks of 4096";
 	} else if (bio->media->read_only) {
 		why = "UEFI gives it out read only";
 	} else if (granted && (store_grant.window_lo == 0 || store_grant.window_lo >= store_grant.window_hi ||
