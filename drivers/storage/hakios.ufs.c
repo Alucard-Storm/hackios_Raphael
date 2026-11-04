@@ -1784,7 +1784,7 @@ hakios_ufs_init(void)
 			bool virt = (ufs_page->part[i].flags & BLOCK_PART_VIRTUAL) != 0;     /* the loader's image file: all of it is ours */
 			const char *why = NULL;
 			uint64_t lo = darwin ? UFS_WRITE_FIRST : ufs_page->write_first;
-			uint64_t hi = darwin ? UFS_DARWIN_BLOCKS : ufs_page->write_end;
+			uint64_t hi = darwin ? ufs_page->part[i].blocks : ufs_page->write_end;
 
 			/*
 			 * darwin is the port's own partition and its identity is known here too. Any other
@@ -1807,10 +1807,8 @@ hakios_ufs_init(void)
 				why = "its blocks are not 4096 bytes";
 			} else if (darwin && ufs_page->write_first != UFS_WRITE_FIRST) {
 				why = "the window is not the one it was";
-			} else if (darwin && ufs_page->part[i].start_lba != UFS_DARWIN_FIRST) {
-				why = "it does not begin where it did";
-			} else if (darwin && ufs_page->part[i].blocks != UFS_DARWIN_BLOCKS) {
-				why = "it is not the size it was";
+			} else if (darwin && ufs_page->part[i].blocks < UFS_DARWIN_MIN) {
+				why = "it is smaller than the layout's 20 GiB";
 			} else if ((virt && hi > ufs_page->part[i].blocks) ||
 			    (!virt && (lo == 0 || lo >= hi || hi > ufs_page->part[i].blocks)) || lo >= hi) {
 				why = "the window is not inside it";
