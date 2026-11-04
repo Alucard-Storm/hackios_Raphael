@@ -2023,8 +2023,8 @@ step_image(void)
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
 
-		if ((image.segment[s].at | image.segment[s].memory_size) & 7) {
-			printf("wifi: %u: a segment that does not begin and end at a multiple of eight bytes: not written\n", step);
+		if (image.segment[s].at & 7) {   /* (a size that is not a multiple of eight is written to its end byte by byte, below) */
+			printf("wifi: %u: a segment that does not begin at a multiple of eight bytes: not written\n", step);
 			/* The 25 MB mapping is given back on this way out too, or every failed try would keep it. */
 			ml_io_unmap((vm_offset_t)dsp_memory, WPSS_MEMORY_SIZE);
 			return false;

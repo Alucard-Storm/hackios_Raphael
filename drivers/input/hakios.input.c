@@ -21,11 +21,18 @@ hakios_is_raphael(void)
 	DTEntry entry;
 	void const *prop;
 	unsigned int size;
+	static int said;
+	int arm_io = SecureDTLookupEntry(NULL, "/arm-io", &entry), type = -1;
 
-	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
-	    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess &&
-	    strcmp((const char *)prop, "raphael") == 0) {
-		return 1;
+	if (arm_io == kSuccess) {
+		type = SecureDTGetProperty(entry, "device_type", &prop, &size);
+		if (type == kSuccess && strcmp((const char *)prop, "raphael") == 0) {
+			return 1;
+		}
+	}
+	if (!said) {
+		said = 1;
+		printf("platform: /arm-io lookup %d, device_type %d (%s)\n", arm_io, type, type == kSuccess ? (const char *)prop : "none");
 	}
 	if (SecureDTLookupEntry(NULL, "/chosen", &entry) == kSuccess &&
 	    SecureDTGetProperty(entry, "hackios,platform", &prop, &size) == kSuccess &&
