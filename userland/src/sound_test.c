@@ -198,6 +198,12 @@ wait_for_ringer(void)
 		sleep(1);
 	}
 	printf("sound_test: the ringer is %s after %d s\n", state ? "on" : "still off", seconds);
+	if (state) {
+		/* the audio server reads the state when it starts, which may be before SpringBoard has set it: it hears of a change
+		 * by the notification, so say it again now that the state is right */
+		notify_post("com.apple.springboard.ringerstate");
+		printf("sound_test: the ringer's state announced again\n");
+	}
 	notify_cancel(token);
 }
 

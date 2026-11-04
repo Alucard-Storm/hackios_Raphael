@@ -1,0 +1,7 @@
+# Commands run by the launchd job com.hakios.demo: what the sound and the vibration do on the Redmi K20 Pro.
+# The audio server reads the ringer's state when it starts; if SpringBoard has not set it by then it stays silent.
+# "springboard" waits for the state to be "on" and announces it again, which the audio server hears.
+/redwood/bin/sound_test springboard
+/redwood/bin/sound_test wait 3 route
+/redwood/bin/sound_test system 1100
+/redwood/bin/sound_test wait 2 haptic

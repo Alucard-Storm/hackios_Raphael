@@ -26,6 +26,7 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 export DEVICE=raphael
+export XL_FIRMWARE=${XL_FIRMWARE:-silicium}      # the Mu-Silicium UEFI of this port (devices/raphael/uefi); xl would else look for a U-Boot
 
 SIZE_GIB=16 SECS= PERSIST=1 WIFI=1 CHECK=0 REBUILD=0 YES=0
 while [ $# -gt 0 ]; do
